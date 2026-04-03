@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg-info/
+.venv/
+venv/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+
+# VS Code
+.vscode/
+
+# Generated outputs
+pipeline_outputs/
+simulation_outputs/
+
+# Data files you do NOT want to publish
+data/real/
+*.bak
+*.tmp
+.DS_Store
+
+# OS
+Thumbs.db
