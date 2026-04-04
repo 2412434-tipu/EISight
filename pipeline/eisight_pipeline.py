@@ -788,7 +788,6 @@ class Evaluator:
             0.5,
             0.5,
             "Synthetic feasibility study\n\n"
-            "Do NOT report these as real hardware results.\n\n"
             f"Freq grid: {frequencies[0]/1e3:.1f} to {frequencies[-1]/1e3:.1f} kHz\n"
             f"Points: {len(frequencies)}\n"
             f"Noise: sigma={cfg.NOISE_STD:.1f} Ohm",
