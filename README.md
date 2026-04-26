@@ -4,18 +4,15 @@
 This repository contains the software pipeline, firmware, and hardware schematics for an IoT-enabled Electrical Impedance Spectroscopy (EIS) system. The project aims to detect adulterants in liquid commodities (with an initial focus on milk) using a low-cost AD5933 impedance converter paired with an ESP32 microcontroller.
 
 ## Repository Structure
-- `/pipeline` - The canonical machine learning preprocessing and inference scripts.
-- `/data/simulated` - Synthetic Cole-Cole impedance data.
-- `/data/real` - Physical hardware measurements (AD5933).
-- `/data/legacy` - Archived scripts and previous iteration data.
-- `/figures` - Generated plots (Bode/Nyquist, feature importance).
-- `/docs` - Progress reports, literature reviews, and SOPs.
-- `/firmware` - C++ code for the ESP32 (I2C communication with AD5933).
-- `/hardware` - Fritzing diagrams and cell design.
-- `/app` - Smartphone/Dashboard UI files.
+- `/synthetic_pipeline` - AURA Phase 2 feasibility study, **synthetic only** (Cole–Cole simulation, 1–100 kHz). See `synthetic_pipeline/SCOPE.md`.
+- `/software/eisight_logger` - Real hardware pipeline: serial listener, calibration, QC, and v4.0c gates (in progress).
+- `/software/eisight_dashboard` - Local Streamlit dashboard for calibrated sweeps and gate verdicts (planned).
+- `/firmware/eisight_fw` - ESP32 firmware: AD5933 driver and JSONL packet emitter (planned).
+- `/hardware` - Bench logs, jumper state, RFB inventory, electrode-cell notes.
 - `/paper` - Literature library: reference PDFs cited in the blueprint and progress report.
+- `/docs` - v4.0c blueprint and AURA progress reports.
+- `/tests/synthetic` - Regression fixtures (synthetic resistor JSONL traces) for the software modules.
+- `/figures`, `/pipeline_outputs` - Legacy synthetic outputs from the Phase 2 feasibility study (`pipeline_outputs/` is gitignored).
 
-## Software Stack
-The machine learning pipeline is built in Python 3.11 using `scikit-learn`, `pandas`, and `numpy`. 
-To replicate the environment, install the requirements via:
-`pip install -r pipeline/requirements.txt`
+## Authoritative Specification
+All hardware-side work follows `docs/EISight_Blueprint_v4_0c.pdf`. The synthetic pipeline predates v4.0c and is preserved unchanged for reproducibility of the Phase 2 report.

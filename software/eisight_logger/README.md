@@ -1,0 +1,1 @@
+Laptop-side serial listener for the v4.0c hardware path: ingests JSONL packets from the ESP32, runs per-session calibration, applies QC and gates (G-DC3, G-RFB, G-SAT, G-LIN, G-DMMx), and writes calibrated sweeps and plots.
