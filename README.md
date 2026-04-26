@@ -13,7 +13,7 @@ This repository contains the software pipeline, firmware, and hardware schematic
 - `/firmware` - C++ code for the ESP32 (I2C communication with AD5933).
 - `/hardware` - Fritzing diagrams and cell design.
 - `/app` - Smartphone/Dashboard UI files.
-- `/paper` - LaTeX source files for documentation.
+- `/paper` - Literature library: reference PDFs cited in the blueprint and progress report.
 
 ## Software Stack
 The machine learning pipeline is built in Python 3.11 using `scikit-learn`, `pandas`, and `numpy`. 
