@@ -1,6 +1,8 @@
 # Python
 __pycache__/
+**/__pycache__/
 *.py[cod]
+*.pyc
 *.pyo
 *.pyd
 *.egg-info/
@@ -20,6 +22,8 @@ simulation_outputs/
 
 # Data files you do NOT want to publish
 data/real/
+data/simulated/
+data/legacy/
 *.bak
 *.tmp
 .DS_Store
