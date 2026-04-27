@@ -45,6 +45,11 @@ from pydantic import ValidationError
 from eisight_logger.raw_writer import RawCsvWriter
 from eisight_logger.schemas import parse_line
 
+# Matches the firmware README's USB-serial bridge rate.
+# Single source of truth for both listen_serial()'s default and
+# the --baud argparse default.
+DEFAULT_BAUD = 921600
+
 
 class ListenerStats:
     """Counters surfaced at shutdown.
@@ -67,7 +72,7 @@ class ListenerStats:
 def listen_serial(
     port: str,
     session_id: str,
-    baud: int = 921600,
+    baud: int = DEFAULT_BAUD,
     output_root: Path = Path("data/real"),
     operator: str = "",
     sample_id: str = "",
@@ -244,8 +249,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Path to a captured .jsonl file. File-replay mode.",
     )
     parser.add_argument(
-        "--baud", type=int, default=921600,
-        help="Serial baud (default 921600 to match firmware README).",
+        "--baud", type=int, default=DEFAULT_BAUD,
+        help=f"Serial baud (default {DEFAULT_BAUD} to match firmware README).",
     )
     parser.add_argument(
         "--output-root", type=Path, default=Path("data/real"),
