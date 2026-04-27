@@ -24,3 +24,4 @@
   patched fork of mjmeli/arduino-ad5933.
 - Approve file changes in small batches. Stop and ask if
   a refactor would touch more than ~5 files at once.
+- Commit after every approved file lands. Push every 2-3 commits. WIP commits welcome.
