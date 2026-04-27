@@ -58,6 +58,21 @@ bool read_point_signed(int16_t* out_real, int16_t* out_imag);
 // parses the 14-bit signed value per §I.2.a.
 bool read_internal_temp_c(float* out_c);
 
+// Pure §I.2.a parse helpers. No bus I/O. These are the
+// same code paths the boot-time self-test in src/self_test.cpp
+// exercises before ad5933::begin() is allowed to run, so a
+// regression in either parser is caught at boot.
+
+// Combine MSB:LSB into a sign-extended int16. AD5933 DFT
+// real (0x94/0x95) and imaginary (0x96/0x97) registers are
+// 16-bit two's-complement.
+int16_t parse_int16(uint8_t msb, uint8_t lsb);
+
+// Parse the 14-bit signed internal-temperature register
+// (0x92/0x93) into °C. D15..D14 are don't-cares (mask
+// 0x3FFF); D13 is the sign bit; scale is 1/32 °C per LSB.
+float parse_temp14_c(uint8_t msb, uint8_t lsb);
+
 // Watchdog: poll STATUS until any bit in `mask` is set, or
 // `budget_us` elapses. Microsecond timing via
 // esp_timer_get_time(). On the FIRST successful poll of a

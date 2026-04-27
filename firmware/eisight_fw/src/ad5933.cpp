@@ -90,6 +90,24 @@ bool send_command(uint8_t cmd) {
 // Public API
 // =========================================================
 
+// Blueprint §I.2.a frozen rule. Combine MSB:LSB and cast
+// through int16_t (NOT uint16_t→int) so negative values
+// sign-extend correctly on the ESP32's 32-bit `int`.
+int16_t parse_int16(uint8_t msb, uint8_t lsb) {
+  return (int16_t)(((uint16_t)msb << 8) | lsb);
+}
+
+// Blueprint §I.2.a frozen rule. 14-bit signed value in a
+// 16-bit envelope. D15..D14 are don't-cares; D13 is the
+// sign bit. Mask to 14 bits, sign-extend if D13 set, scale
+// by 0.03125 °C/LSB (= 1/32 °C).
+float parse_temp14_c(uint8_t msb, uint8_t lsb) {
+  const uint16_t raw = ((uint16_t)msb << 8) | lsb;
+  int16_t s14 = (int16_t)(raw & 0x3FFF);
+  if (s14 & 0x2000) s14 -= 0x4000;
+  return (float)s14 * 0.03125f;
+}
+
 bool begin() {
   Wire.begin(kPinSda, kPinScl);
   Wire.setClock(kI2cClockHz);
@@ -186,11 +204,8 @@ bool read_point_signed(int16_t* out_real, int16_t* out_imag) {
   if (!read_register(kRegImagMsb, &imag_msb)) return false;
   if (!read_register(kRegImagLsb, &imag_lsb)) return false;
 
-  // Blueprint §I.2.a frozen rule. Combine MSB:LSB and cast
-  // through int16_t (NOT uint16_t→int) so negative values
-  // sign-extend correctly on the ESP32's 32-bit `int`.
-  *out_real = (int16_t)(((uint16_t)real_msb << 8) | real_lsb);
-  *out_imag = (int16_t)(((uint16_t)imag_msb << 8) | imag_lsb);
+  *out_real = parse_int16(real_msb, real_lsb);
+  *out_imag = parse_int16(imag_msb, imag_lsb);
   return true;
 }
 
@@ -208,17 +223,10 @@ bool read_internal_temp_c(float* out_c) {
   } while (esp_timer_get_time() < deadline_us);
   if (!(status & kStatusValidTemp)) return false;
 
-  // Blueprint §I.2.a: 14-bit signed value in a 16-bit
-  // envelope. D15..D14 are don't-cares; D13 is the sign bit.
-  // Mask to 14 bits, sign-extend if D13 set, scale by
-  // 0.03125 °C/LSB (= 1/32 °C).
   uint8_t t_msb, t_lsb;
   if (!read_register(kRegTempMsb, &t_msb)) return false;
   if (!read_register(kRegTempLsb, &t_lsb)) return false;
-  const uint16_t raw = ((uint16_t)t_msb << 8) | t_lsb;
-  int16_t s14 = (int16_t)(raw & 0x3FFF);
-  if (s14 & 0x2000) s14 -= 0x4000;
-  *out_c = (float)s14 * 0.03125f;
+  *out_c = parse_temp14_c(t_msb, t_lsb);
   return true;
 }
 
