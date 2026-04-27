@@ -5,9 +5,9 @@ This repository contains the software pipeline, firmware, and hardware schematic
 
 ## Repository Structure
 - `/synthetic_pipeline` - AURA Phase 2 feasibility study, **synthetic only** (Cole–Cole simulation, 1–100 kHz). See `synthetic_pipeline/SCOPE.md`.
-- `/software/eisight_logger` - Real hardware pipeline: serial listener, calibration, QC, and v4.0c gates (in progress).
+- `/software/eisight_logger` - Real hardware pipeline: serial listener, calibration, QC, and v4.0c gates (planned, next session).
 - `/software/eisight_dashboard` - Local Streamlit dashboard for calibrated sweeps and gate verdicts (planned).
-- `/firmware/eisight_fw` - ESP32 firmware: AD5933 driver and JSONL packet emitter (planned).
+- `/firmware/eisight_fw` - ESP32 firmware: AD5933 driver, DS18B20 reader, JSONL packet emitter. **Complete and building clean** (22.8% flash / 6.7% RAM on `esp32dev`). See [`firmware/eisight_fw/README.md`](firmware/eisight_fw/README.md) for the operator manual.
 - `/hardware` - Bench logs, jumper state, RFB inventory, electrode-cell notes.
 - `/paper` - Literature library: reference PDFs cited in the blueprint and progress report.
 - `/docs` - v4.0c blueprint and AURA progress reports.
