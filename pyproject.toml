@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eisight-logger"
+version = "0.1.0"
+description = "EISight v4.0c laptop-side measurement pipeline"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy",
+    "pandas",
+    "pyserial",
+    "scipy",
+    "matplotlib",
+    "streamlit",
+    "pydantic>=2",
+    "pytest",
+]
+
+[project.scripts]
+eisight-logger = "eisight_logger.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["software"]
