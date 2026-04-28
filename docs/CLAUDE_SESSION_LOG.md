@@ -5,6 +5,81 @@ work. One entry per session; newest first. Format intentionally
 terse -- the commits and code are the source of truth, this file
 just bookmarks where each session started and stopped.
 
+## 2026-04-29 session (continued -- path-(b) refactor completion + packaging)
+
+Landed: gate runners (run_g_dc3 in g_dc3.py, run_g_sat in
+        g_sat.py, run_g_lin in g_lin.py) with shared
+        write_report_artifacts helper in common.py;
+        slimmed cli.py (265 lines, path-(b) refactor
+        complete); scripts/validate_logs.py;
+        pyproject.toml (editable install).
+
+Commits:
+  - 60403d0 Add gate runners: run_g_dc3, run_g_sat,
+            run_g_lin with shared write_report_artifacts
+            helper
+  - 593dad4 Slim cli.py per path-(b) refactor: ~265 lines,
+            thin routing, runners own orchestration
+  - 31bacb3 Add scripts/validate_logs.py: hardware/ CSV
+            header conformance check per §F.6/§F.7
+  - b14ff6b Add pyproject.toml: editable install with
+            eisight-logger console script entry
+
+Remaining: plots.py, tests/synthetic/
+           generate_resistor_jsonl.py, test_schemas.py,
+           test_calibration.py, test_qc.py,
+           test_gates.py, README.md, pytest run.
+
+Next session resumes at: tests/synthetic/generate_resistor_jsonl.py.
+Decision: the synthetic fixture generator lands before
+plots.py because the four pytest files
+(test_schemas/test_calibration/test_qc/test_gates) all need
+deterministic synthetic JSONL to exercise the runner contract,
+and plots.py will eventually consume the same fixtures for
+its golden-image tests. plots.py can then build on a working
+test suite rather than the other way round.
+
+Open notes:
+  - Path-(b) refactor complete across three commits
+    (c17a99d module runners, 60403d0 gate runners,
+    593dad4 slim cli). cli.py final size 265 lines, ~40%
+    smaller than the rejected 432-line draft.
+  - eisight-logger console script live via pyproject.toml;
+    pip install -e . confirmed working (exit 0). All seven
+    subcommands (listen, validate, calibrate, qc, trust,
+    gate, plot) appear in eisight-logger --help. plot is a
+    NotImplementedError stub until plots.py lands.
+  - write_report_artifacts is a submodule helper in
+    gates/common.py (not in __all__) that deduplicates the
+    fmt='text'/'json'/'both' write pattern across all three
+    gate runners. Same pattern as _trusted_freqs_from_csv
+    in g_lin.py (private to one runner) and load_inventory
+    in calibration.py (used only by run_calibration).
+  - validate_logs.py exit code: 0 if all hardware/ CSVs
+    PASS, 1 if any MISSING/MALFORMED. Header-only templates
+    are created where MISSING so the operator has a starting
+    point. MALFORMED files are NOT modified -- avoids
+    silently overwriting hand-entered data. The script is at
+    196 lines (under the 200 max).
+  - pyproject.toml package discovery uses where=["software"]
+    only; synthetic_pipeline/ and scripts/ are intentionally
+    out of the package surface (synthetic is feasibility-only
+    per CLAUDE.md; scripts/validate_logs.py is a standalone
+    tool, not an importable module).
+  - g_sat.py grew to 317 lines after run_g_sat landed (was
+    269); single-purpose module with the F.10.a primary/
+    informational-load logic, the contiguous-band aggregator,
+    the failures DataFrame schema, and the runner. Justified
+    above 300 per the CLAUDE.md justify-or-split rule.
+  - jumper_state.csv and dmm_inventory.csv columns in
+    validate_logs.py are spec-derived but not enumerated
+    explicitly in the .tex (jumper_state from §E.1 truth-
+    table header + §E.7 step 11 'tag with post_rework';
+    dmm_inventory from §F.7 step 1's 'DMM model and
+    accuracy class' minimum). Documented as the assumption
+    in the script docstring; revisit if §F.16 ever
+    enumerates them.
+
 ## 2026-04-28 session (continued -- runners path-(b) refactor, partial)
 
 Landed: load_inventory + run_calibration (calibration.py),
