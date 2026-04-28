@@ -223,6 +223,7 @@ def _g_sat_freqs_for(
     module_id: str,
     band_resistors: Tuple[str, ...],
 ) -> Set[float]:
+    # Consumes the schema defined in gates.g_sat.G_SAT_FAILURE_COLUMNS.
     if g_sat_failures is None:
         return set()
     gsf = g_sat_failures[
