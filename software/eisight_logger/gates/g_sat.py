@@ -53,7 +53,8 @@ Implements: §F.10.a (G-SAT). Consumes: §I.6 calibration CSV.
 
 from __future__ import annotations
 
-from typing import List, Tuple, Union
+from pathlib import Path
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -62,6 +63,7 @@ from eisight_logger.gates.common import (
     GateReport,
     GateVerdict,
     aggregate_verdict,
+    write_report_artifacts,
 )
 
 # §F.10.a thresholds.
@@ -267,3 +269,49 @@ def build_g_sat_failures(
     if primary_only and "is_primary" in fails.columns:
         fails = fails[fails["is_primary"]]
     return fails[G_SAT_FAILURE_COLUMNS].reset_index(drop=True)
+
+
+def run_g_sat(
+    cal_path: Union[Path, str],
+    output_dir: Optional[Union[Path, str]] = None,
+    failures_output: Optional[Union[Path, str]] = None,
+    *,
+    pass_threshold_pct: float = G_SAT_PASS_THRESHOLD_PCT,
+    min_band_width_hz: float = G_SAT_MIN_BAND_WIDTH_HZ,
+    primary_loads: Tuple[str, ...] = G_SAT_PRIMARY_LOADS,
+    informational_loads: Tuple[str, ...] = G_SAT_INFORMATIONAL_LOADS,
+    anchor_load_id: str = G_SAT_ANCHOR_LOAD_ID,
+    fmt: str = "both",
+) -> GateReport:
+    """Read §I.6 cal table; evaluate G-SAT; optionally write report + failures.
+
+    Composes pd.read_csv + evaluate_g_sat + write_report_artifacts +
+    build_g_sat_failures. Returns the GateReport regardless of
+    whether output_dir is supplied; pass output_dir=None to use
+    the result in-memory.
+
+    failures_output, when supplied, writes the primary-load
+    failures triple (G_SAT_FAILURE_COLUMNS) to that CSV path.
+    Schema is the cross-module contract with
+    trusted_band._g_sat_freqs_for; pass the same path through
+    run_trusted_band's g_sat_failures_path to wire the result.
+    """
+    cal_df = pd.read_csv(cal_path, dtype=str, keep_default_na=False)
+    report = evaluate_g_sat(
+        cal_df,
+        pass_threshold_pct=pass_threshold_pct,
+        min_band_width_hz=min_band_width_hz,
+        primary_loads=primary_loads,
+        informational_loads=informational_loads,
+        anchor_load_id=anchor_load_id,
+    )
+    if output_dir is not None:
+        write_report_artifacts(report, output_dir, "g_sat", fmt=fmt)
+    if failures_output is not None:
+        failures_df = build_g_sat_failures(report, primary_only=True)
+        out = Path(failures_output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        failures_df[G_SAT_FAILURE_COLUMNS].to_csv(
+            out, index=False, na_rep=""
+        )
+    return report

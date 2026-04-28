@@ -171,3 +171,27 @@ def _records_with_nan_as_null(df: pd.DataFrame) -> list:
         return []
     cleaned = df.where(pd.notna(df), None)
     return cleaned.to_dict(orient="records")
+
+
+def write_report_artifacts(
+    report: GateReport,
+    output_dir: Union[Path, str],
+    stem: str,
+    fmt: str = "both",
+) -> None:
+    """Write {stem}.txt and/or {stem}.json under output_dir.
+
+    fmt is one of "text", "json", "both". Submodule helper for
+    the run_g_* runners; not part of the gates package public
+    surface (callers reach in via eisight_logger.gates.common).
+    """
+    if fmt not in ("text", "json", "both"):
+        raise ValueError(
+            f"fmt must be 'text', 'json', or 'both' (got {fmt!r})"
+        )
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    if fmt in ("text", "both"):
+        write_text(report, out / f"{stem}.txt")
+    if fmt in ("json", "both"):
+        write_json(report, out / f"{stem}.json")

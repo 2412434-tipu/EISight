@@ -40,7 +40,8 @@ Implements: §F.10.b (G-LIN). Consumes: §I.6 calibration CSV
 
 from __future__ import annotations
 
-from typing import Iterable, List, Optional
+from pathlib import Path
+from typing import Iterable, List, Optional, Union
 
 import pandas as pd
 
@@ -48,6 +49,7 @@ from eisight_logger.gates.common import (
     GateReport,
     GateVerdict,
     aggregate_verdict,
+    write_report_artifacts,
 )
 
 G_LIN_PASS_THRESHOLD_PCT = 2.0
@@ -228,3 +230,67 @@ def _r_test_actual(
     if rows.empty:
         return None
     return float(rows["actual_ohm"].iloc[0])
+
+
+def _trusted_freqs_from_csv(path: Union[Path, str]) -> List[float]:
+    """Extract trusted-band frequencies from a merged §I.5/§I.6 CSV.
+
+    Either of run_trusted_band's outputs (merged_raw, merged_cal)
+    works as input -- both carry module_id, frequency_hz, and the
+    "True"/"False"/"" trusted_flag encoding locked in
+    raw_writer.py. Returns the unique frequency_hz values whose
+    trusted_flag is "True"; the §H.5 trusted band is module-level
+    so a frequency trusted on any module is included.
+    """
+    df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    trusted_rows = df[df["trusted_flag"] == "True"]
+    if trusted_rows.empty:
+        return []
+    freqs = pd.to_numeric(
+        trusted_rows["frequency_hz"], errors="raise"
+    ).astype(float)
+    return sorted(set(freqs.tolist()))
+
+
+def run_g_lin(
+    cal_r4_path: Union[Path, str],
+    cal_r2_path: Union[Path, str],
+    output_dir: Optional[Union[Path, str]] = None,
+    trusted_band_csv: Optional[Union[Path, str]] = None,
+    *,
+    pass_threshold_pct: float = G_LIN_PASS_THRESHOLD_PCT,
+    test_load_id: str = G_LIN_TEST_LOAD_ID,
+    anchor_load_id: str = G_LIN_ANCHOR_LOAD_ID,
+    fmt: str = "both",
+) -> GateReport:
+    """Read two §I.6 cal tables; evaluate G-LIN; optionally write.
+
+    Composes pd.read_csv x2 + _trusted_freqs_from_csv (when
+    trusted_band_csv is supplied) + evaluate_g_lin +
+    write_report_artifacts. Returns the GateReport regardless
+    of whether output_dir is supplied.
+
+    trusted_band_csv accepts either of run_trusted_band's
+    outputs (merged_raw or merged_cal); the trusted-frequency
+    set is extracted from rows with trusted_flag == "True".
+    Pass None to evaluate every overlapping (Range-4, Range-2)
+    frequency -- conservative, but a single bad edge frequency
+    would FAIL the module under that mode.
+    """
+    cal_r4 = pd.read_csv(cal_r4_path, dtype=str, keep_default_na=False)
+    cal_r2 = pd.read_csv(cal_r2_path, dtype=str, keep_default_na=False)
+    trusted_freqs = (
+        _trusted_freqs_from_csv(trusted_band_csv)
+        if trusted_band_csv is not None
+        else None
+    )
+    report = evaluate_g_lin(
+        cal_r4, cal_r2,
+        pass_threshold_pct=pass_threshold_pct,
+        test_load_id=test_load_id,
+        anchor_load_id=anchor_load_id,
+        trusted_band_freqs=trusted_freqs,
+    )
+    if output_dir is not None:
+        write_report_artifacts(report, output_dir, "g_lin", fmt=fmt)
+    return report

@@ -26,7 +26,7 @@ Consumes: hardware/dc_bias_check.csv.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Union
+from typing import List, Optional, Union
 
 import pandas as pd
 
@@ -34,6 +34,7 @@ from eisight_logger.gates.common import (
     GateReport,
     GateVerdict,
     aggregate_verdict,
+    write_report_artifacts,
 )
 
 # §E.11 thresholds.
@@ -163,3 +164,33 @@ def load_dc_bias_csv(path: Union[Path, str]) -> pd.DataFrame:
             f"{p}: missing §F.6 columns {sorted(missing)}"
         )
     return df
+
+
+def run_g_dc3(
+    csv_path: Union[Path, str],
+    output_dir: Optional[Union[Path, str]] = None,
+    *,
+    pass_threshold_mv: float = G_DC3_PASS_THRESHOLD_MV,
+    fail_threshold_mv: float = G_DC3_FAIL_THRESHOLD_MV,
+    gating_range: str = G_DC3_GATING_RANGE,
+    fmt: str = "both",
+) -> GateReport:
+    """Read §F.6 dc_bias_check.csv; evaluate G-DC3; optionally write.
+
+    Composes load_dc_bias_csv + evaluate_g_dc3 +
+    write_report_artifacts. Returns the GateReport regardless
+    of whether output_dir is supplied; pass output_dir=None to
+    use the result in-memory (dashboards, notebooks, paper
+    figure scripts). When output_dir is supplied, writes
+    g_dc3.txt and/or g_dc3.json under it per fmt.
+    """
+    df = load_dc_bias_csv(csv_path)
+    report = evaluate_g_dc3(
+        df,
+        pass_threshold_mv=pass_threshold_mv,
+        fail_threshold_mv=fail_threshold_mv,
+        gating_range=gating_range,
+    )
+    if output_dir is not None:
+        write_report_artifacts(report, output_dir, "g_dc3", fmt=fmt)
+    return report
