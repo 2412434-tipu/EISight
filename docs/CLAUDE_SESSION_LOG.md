@@ -5,6 +5,95 @@ work. One entry per session; newest first. Format intentionally
 terse -- the commits and code are the source of truth, this file
 just bookmarks where each session started and stopped.
 
+## 2026-04-29 session (continued -- test suite + operator README)
+
+Landed: tests/synthetic/generate_resistor_jsonl.py (ideal-
+        resistor JSONL fixture); tests/synthetic/test_schemas.py
+        (33 tests); tests/synthetic/test_calibration.py (5
+        tests); tests/synthetic/test_qc.py (14 tests);
+        tests/synthetic/test_gates.py (15 tests);
+        software/eisight_logger/README.md (242-line operator
+        manual with end-to-end synthetic walk-through).
+
+Commits:
+  - 48e2a72 Add tests/synthetic/generate_resistor_jsonl.py:
+            ideal-resistor JSONL fixture for tests
+  - b7ab7ab Add tests/synthetic/test_schemas.py: 33 tests
+            covering §I.2.a int16 boundary, required-field
+            presence, empty-string-vs-null conventions,
+            and i2c_scan addr grammar
+  - bfef18a Add tests/synthetic/test_calibration.py: 5 tests
+            covering §H.2 GF math, §I.6 round-trip, and
+            runner contract
+  - 5e0bd68 Add tests/synthetic/test_qc.py: 14 tests
+            covering §H.8 QC rules and §I.5 boolean
+            encoding round-trip
+  - fea9997 Add tests/synthetic/test_gates.py: 15 tests
+            covering G-DC3/G-SAT/G-LIN evaluators and
+            runner contract
+  - 1d03941 Add eisight_logger/README.md: operator manual
+            with synthetic walk-through
+
+Remaining: plots.py (pending; the `plot` CLI subcommand
+           currently raises NotImplementedError), full
+           pytest run with coverage measurement, top-level
+           README.md update to reflect the now-complete
+           eisight_logger.
+
+Next session resumes at: plots.py.
+
+Open notes:
+  - 67 tests pass in 1.72s. Coverage of the four most
+    load-bearing modules is intentionally biased toward
+    contract violations (extra="forbid" drift, int16
+    boundaries on both ends, runner-return-vs-write
+    semantics) rather than happy-path duplication of the
+    runner code.
+  - test_qc.py findings (worth carrying forward): pandas
+    coerces a Python `bool` list to numpy.bool_ at
+    DataFrame construction, so `qc.iloc[0]["qc_pass"] is
+    True` returns False even when the value is logically
+    True. Fix is `bool(qc.iloc[0]["qc_pass"]) is True` --
+    not a runner bug. The {True: "True", False: "False"}
+    dict in qc_pass_to_str works under == semantics so
+    numpy booleans round-trip to string encoding correctly;
+    no runner change.
+  - generate_resistor_jsonl uses |Z|=R, phase=0, M = 1e6/R
+    so all six v4.0c target resistors (100..10k) produce
+    real values comfortably inside the §I.2.a int16
+    window (M=100..10000 vs +/-32767). Saturation tests
+    inject endpoints by hand instead of relying on a
+    tightly-tuned K. SYNTHETIC_GF_K = 1e6 documented in
+    the module docstring.
+  - row_type defaults to "CAL" in the fixture so the
+    resulting raw.csv (after replay_file) is calibration-
+    ready immediately. Pass row_type="" to mimic the
+    firmware's actual blank emission and let the laptop
+    annotate later. Documented in the function docstring.
+  - G-LIN cannot be exercised end-to-end with a single
+    synthetic file; it requires Range 4 + Range 2 cal
+    tables per §F.10.b. The pytest suite tests evaluate_g_lin
+    directly with two synthetic cal frames; the README
+    walk-through documents the two-table requirement
+    explicitly and shows the call shape but does not run
+    it.
+  - The README walk-through was captured from a real
+    `eisight-logger` invocation against /tmp/walk/, not
+    transcribed from the source. Every command and output
+    quoted there is verbatim from a fresh `pip install -e .`
+    run. If a CLI flag rename later breaks the
+    walk-through, the README is the canary.
+  - Spec ambiguity surfaced during fixture generation:
+    schemas.PgaStr is Literal["X1", "X5"], not "PGA_1" /
+    "PGA_5" as the user prompt sketched. Followed the
+    schema (X1/X5) since that is the wire-format source
+    of truth in firmware/eisight_fw/src/jsonl.cpp; the
+    Python kwarg name `pga_setting` keeps the schema
+    nomenclature too. Same goes for the `range` JSON key
+    vs the `range_setting` Python kwarg -- the schema
+    field is `range` (a Python keyword shadow that
+    pydantic handles fine via the model field name).
+
 ## 2026-04-29 session (continued -- path-(b) refactor completion + packaging)
 
 Landed: gate runners (run_g_dc3 in g_dc3.py, run_g_sat in
