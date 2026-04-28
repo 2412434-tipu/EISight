@@ -58,7 +58,8 @@ drift). Consumes: §I.5 raw CSV (raw_writer.RAW_CSV_COLUMNS).
 
 from __future__ import annotations
 
-from typing import Dict, List
+from pathlib import Path
+from typing import Dict, List, Optional, Union
 
 import numpy as np
 import pandas as pd
@@ -68,6 +69,7 @@ from eisight_logger.phase import (
     phase_to_deg,
     raw_phase_rad,
 )
+from eisight_logger.raw_writer import RAW_CSV_COLUMNS
 
 # AD5933 STATUS bit D1 = valid real/imag (datasheet).
 _STATUS_VALID_DATA_MASK = 0x02
@@ -270,3 +272,32 @@ def merge_qc_columns(
     out.loc[qc_df.index, "qc_pass"] = qc_pass_to_str(qc_df["qc_pass"])
     out.loc[qc_df.index, "qc_reasons"] = qc_df["qc_reasons"].astype(str)
     return out
+
+
+def run_qc(
+    raw_path: Union[Path, str],
+    output_path: Optional[Union[Path, str]] = None,
+    *,
+    phase_jump_deg_max: float = QC_PHASE_JUMP_DEG,
+    temp_drift_c_max: float = QC_TEMP_DRIFT_C,
+) -> pd.DataFrame:
+    """Read §I.5 raw; run §H.8 QC; merge; optionally write.
+
+    Composes evaluate_qc + merge_qc_columns. Returns the merged
+    §I.5 raw DataFrame (qc_pass / qc_reasons populated under the
+    locked 'True'/'False'/'' string encoding) regardless of
+    whether output_path is supplied. Pass output_path=None to use
+    the result in-memory (dashboards, notebooks).
+    """
+    raw_df = pd.read_csv(raw_path, dtype=str, keep_default_na=False)
+    qc_df = evaluate_qc(
+        raw_df,
+        phase_jump_deg_max=phase_jump_deg_max,
+        temp_drift_c_max=temp_drift_c_max,
+    )
+    merged = merge_qc_columns(raw_df, qc_df)
+    if output_path is not None:
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        merged[RAW_CSV_COLUMNS].to_csv(out, index=False, na_rep="")
+    return merged

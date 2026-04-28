@@ -39,10 +39,14 @@ thresholds), §H.8 (status / saturation / phase-jump rules),
 
 from __future__ import annotations
 
-from typing import Optional, Set, Tuple
+from pathlib import Path
+from typing import Optional, Set, Tuple, Union
 
 import numpy as np
 import pandas as pd
+
+from eisight_logger.calibration import CAL_CSV_COLUMNS
+from eisight_logger.raw_writer import RAW_CSV_COLUMNS
 
 # §I.2.a int16 endpoints. Either is a saturation flag.
 _INT16_MAX = 32767
@@ -343,3 +347,55 @@ def merge_trusted_flag(
     merged = out.merge(flags, on=["module_id", "frequency_hz"], how="left")
     merged["trusted_flag"] = trusted_flags_to_str(merged["trusted"])
     return merged.drop(columns=["trusted"])
+
+
+def run_trusted_band(
+    raw_path: Union[Path, str],
+    cal_path: Union[Path, str],
+    raw_output: Optional[Union[Path, str]] = None,
+    cal_output: Optional[Union[Path, str]] = None,
+    g_sat_failures_path: Optional[Union[Path, str]] = None,
+    *,
+    mag_residual_pct_max: float = TRUSTED_BAND_MAG_RESIDUAL_PCT,
+    phase_residual_deg_max: float = TRUSTED_BAND_PHASE_RESIDUAL_DEG,
+    cv_pct_max: float = TRUSTED_BAND_CV_PCT,
+    phase_jump_deg_max: float = TRUSTED_BAND_PHASE_JUMP_DEG,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """Read §I.5 raw + §I.6 cal; run §H.5 trusted-band; merge; optionally write.
+
+    Composes evaluate_trusted_band + merge_trusted_flag for both
+    the raw and cal frames. Returns (merged_raw, merged_cal)
+    regardless of output paths. Pass either output to None to
+    skip that write; pass both to None to use the result
+    in-memory (dashboards, paper figures).
+
+    g_sat_failures_path, when supplied, is read with the same
+    str-typed convention and forwarded to evaluate_trusted_band's
+    criterion 7. Schema is gates.g_sat.G_SAT_FAILURE_COLUMNS.
+    """
+    raw_df = pd.read_csv(raw_path, dtype=str, keep_default_na=False)
+    cal_df = pd.read_csv(cal_path, dtype=str, keep_default_na=False)
+    g_sat = (
+        pd.read_csv(g_sat_failures_path, dtype=str, keep_default_na=False)
+        if g_sat_failures_path is not None
+        else None
+    )
+    flags = evaluate_trusted_band(
+        cal_df, raw_df,
+        mag_residual_pct_max=mag_residual_pct_max,
+        phase_residual_deg_max=phase_residual_deg_max,
+        cv_pct_max=cv_pct_max,
+        phase_jump_deg_max=phase_jump_deg_max,
+        g_sat_failures=g_sat,
+    )
+    merged_raw = merge_trusted_flag(raw_df, flags)
+    merged_cal = merge_trusted_flag(cal_df, flags)
+    if raw_output is not None:
+        out = Path(raw_output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        merged_raw[RAW_CSV_COLUMNS].to_csv(out, index=False, na_rep="")
+    if cal_output is not None:
+        out = Path(cal_output)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        merged_cal[CAL_CSV_COLUMNS].to_csv(out, index=False, na_rep="")
+    return merged_raw, merged_cal

@@ -258,3 +258,81 @@ def apply_gain_factor(
     with np.errstate(divide="ignore"):
         z = np.where(denom != 0.0, 1.0 / denom, np.inf)
     return z
+
+
+def load_inventory(path: Union[Path, str]) -> Dict[str, ResistorAnchor]:
+    """Read hardware/resistor_inventory.csv -> {load_id: ResistorAnchor}.
+
+    §F.7 step 4 lists ``nominal_ohm, measured_ohm, T_C, operator,
+    timestamp`` and the labelling rule (R100_01 .. R10k_10); the
+    spec does not name the label column, so this loader expects
+    a 'load_id' column (the canonical key used everywhere else in
+    the pipeline). Per §F.7 G-DMMx promotion, ``lab_dmm_ohm`` is
+    preferred when present; otherwise ``measured_ohm`` is the
+    handheld fallback. Missing accuracy class -> None -> empty
+    cell in the §I.6 CSV.
+    """
+    inv = pd.read_csv(path, dtype=str, keep_default_na=False)
+    if "load_id" not in inv.columns:
+        raise ValueError(
+            f"{path}: inventory CSV must have a 'load_id' column "
+            "(R100_01 .. R10k_10 per §F.7 step 4)"
+        )
+    actuals: Dict[str, ResistorAnchor] = {}
+    for _, row in inv.iterrows():
+        load_id = str(row["load_id"]).strip()
+        if not load_id:
+            continue
+        lab_ohm = str(row.get("lab_dmm_ohm", "")).strip()
+        if lab_ohm:
+            actual_str = lab_ohm
+            dmm_model = str(row.get("lab_dmm_model", "")).strip()
+            acc_str = str(row.get("lab_dmm_accuracy_class_pct", "")).strip()
+        else:
+            actual_str = str(row.get("measured_ohm", "")).strip()
+            dmm_model = str(row.get("dmm_model", "")).strip()
+            acc_str = ""
+        try:
+            actual_ohm = float(actual_str)
+        except ValueError:
+            continue
+        try:
+            nominal_ohm = float(row.get("nominal_ohm", "") or "nan")
+        except ValueError:
+            nominal_ohm = actual_ohm
+        try:
+            acc = float(acc_str) if acc_str else None
+        except ValueError:
+            acc = None
+        actuals[load_id] = ResistorAnchor(
+            nominal_ohm=nominal_ohm,
+            actual_ohm=actual_ohm,
+            dmm_model=dmm_model,
+            dmm_accuracy_class_pct=acc,
+        )
+    return actuals
+
+
+def run_calibration(
+    raw_path: Union[Path, str],
+    inventory_path: Union[Path, str],
+    output_path: Optional[Union[Path, str]] = None,
+    *,
+    session_id: Optional[str] = None,
+) -> pd.DataFrame:
+    """Read §I.5 raw + inventory; build §I.6 cal table; optionally write.
+
+    Composes load_inventory + build_calibration_table +
+    write_calibration_csv. Returns the cal DataFrame regardless
+    of whether output_path is supplied; pass output_path=None to
+    use the result in-memory (dashboards, notebooks, paper
+    figure scripts).
+    """
+    raw_df = pd.read_csv(raw_path, dtype=str, keep_default_na=False)
+    actuals = load_inventory(inventory_path)
+    cal_df = build_calibration_table(
+        raw_df, actuals, session_id=session_id
+    )
+    if output_path is not None:
+        write_calibration_csv(cal_df, output_path)
+    return cal_df
