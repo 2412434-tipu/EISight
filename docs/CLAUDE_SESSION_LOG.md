@@ -5,6 +5,39 @@ work. One entry per session; newest first. Format intentionally
 terse -- the commits and code are the source of truth, this file
 just bookmarks where each session started and stopped.
 
+## 2026-04-28 session (continued -- runners path-(b) refactor, partial)
+
+Landed: load_inventory + run_calibration (calibration.py),
+        run_qc (qc.py), run_trusted_band (trusted_band.py).
+
+Commits:
+  - c17a99d Add runners: load_inventory + run_calibration
+                         in calibration.py, run_qc in qc.py,
+                         run_trusted_band in trusted_band.py
+
+Remaining: gates runners (run_g_dc3, run_g_sat, run_g_lin),
+           slimmed cli.py, scripts/validate_logs.py,
+           pyproject.toml, plots.py,
+           tests/synthetic/generate_resistor_jsonl.py,
+           test_schemas.py, test_calibration.py,
+           test_qc.py, test_gates.py, README.md, pytest run.
+
+Next session resumes at: gates runners (commit 2).
+
+Open notes:
+  - Runner contract is locked across all seven runners
+    (four in this commit, three pending). All return their
+    primary object always; writes are optional via output
+    path kwargs; no prints, no logger setup.
+  - load_inventory implements §F.7 G-DMMx promotion: lab_dmm_ohm
+    preferred over measured_ohm. Handheld-DMM-only inventory
+    still works; lab DMM data promotes automatically when
+    added later.
+  - cli.py write was rejected at 432 lines because orchestration
+    had leaked into routing. Fix is to push runners back to
+    modules (this commit + next) so cli.py shrinks to ~220 lines
+    of pure argparse routing.
+
 ## 2026-04-28 session (continued -- ended early at gates)
 
 Landed: qc.py, gates/ package (common.py, g_dc3.py, g_sat.py,
