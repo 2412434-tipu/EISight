@@ -25,3 +25,8 @@
 - Approve file changes in small batches. Stop and ask if
   a refactor would touch more than ~5 files at once.
 - Commit after every approved file lands. Push every 2-3 commits. WIP commits welcome.
+- For any file >300 lines, propose a split OR justify the
+  line count in the commit message. Single-purpose modules
+  with multiple independent criteria (e.g., trusted_band.py
+  with 7 §H.5 checks) are acceptable above 300; multi-purpose
+  modules above 300 should split.
