@@ -18,7 +18,7 @@ Subcommands:
   qc          Run §H.8 per-row QC on the §I.5 raw CSV.
   trust       Run §H.5 trusted-band selection over raw + cal.
   gate        Evaluate one of G-DC3 / G-SAT / G-LIN.
-  plot        (Pending plots.py.)
+  plot        Create static matplotlib CSV diagnostic plots.
 
 Implements: §I.4/§I.5 ingest, §I.6/§H.5/§H.8 batch processing,
 §E.11/§F.10.a/§F.10.b gate evaluation -- all by routing to the
@@ -42,6 +42,7 @@ from eisight_logger.gates import (
     run_g_sat,
     verdict_is_pass,
 )
+from eisight_logger.plots import run_plot
 from eisight_logger.qc import (
     QC_PHASE_JUMP_DEG,
     QC_TEMP_DRIFT_C,
@@ -194,7 +195,25 @@ def _add_gate(sub) -> None:
 
 
 def _add_plot(sub) -> None:
-    p = sub.add_parser("plot", help="(Pending plots.py.)")
+    p = sub.add_parser("plot", help="Create static matplotlib CSV plots")
+    p.add_argument(
+        "--type", required=True, dest="plot_type",
+        choices=("raw-dft", "calibration", "repeatability", "trusted-band"),
+    )
+    p.add_argument("--raw", type=Path, default=None, help="raw.csv input")
+    p.add_argument("--cal", type=Path, default=None, help="cal.csv input")
+    p.add_argument(
+        "--trusted-csv", type=Path, default=None,
+        help="trusted-band-merged raw or calibration CSV",
+    )
+    p.add_argument("--output-dir", type=Path, required=True)
+    p.add_argument("--module-id", default=None)
+    p.add_argument("--range-setting", default=None)
+    p.add_argument("--load-id", default=None)
+    p.add_argument("--row-type", default=None)
+    p.add_argument("--sample-id", default=None)
+    p.add_argument("--fmt", choices=("png", "pdf", "svg"), default="png")
+    p.add_argument("--dpi", type=int, default=160)
     p.set_defaults(handler=_cmd_plot)
 
 
@@ -288,7 +307,23 @@ def _cmd_gate(args) -> int:
 
 
 def _cmd_plot(args) -> int:
-    raise NotImplementedError("plots.py pending next session")
+    paths = run_plot(
+        args.plot_type,
+        raw_path=args.raw,
+        cal_path=args.cal,
+        trusted_csv=args.trusted_csv,
+        output_dir=args.output_dir,
+        module_id=args.module_id,
+        range_setting=args.range_setting,
+        load_id=args.load_id,
+        row_type=args.row_type,
+        sample_id=args.sample_id,
+        fmt=args.fmt,
+        dpi=args.dpi,
+    )
+    for path in paths:
+        print(path)
+    return 0
 
 
 def main(argv: Optional[List[str]] = None) -> int:
