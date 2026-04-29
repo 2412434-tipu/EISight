@@ -45,11 +45,13 @@ from eisight_logger.gates import (
     evaluate_g_sat,
 )
 from eisight_logger.gates.g_dc3 import DC_BIAS_CSV_COLUMNS
+from eisight_logger.gates.g_sat import build_g_sat_failures
 from eisight_logger.raw_writer import RAW_CSV_COLUMNS, RawCsvWriter
 from eisight_logger.serial_listener import replay_file
 from eisight_logger.trusted_band import (
     TRUSTED_BAND_RESISTORS,
     evaluate_trusted_band,
+    merge_trusted_flag,
 )
 from tests.synthetic.generate_resistor_jsonl import (
     SYNTHETIC_GF_K,
@@ -337,6 +339,126 @@ def test_absolute_phase_system_offset_alone_does_not_untrust_freq():
         f"reasons={row['reasons']!r}"
     )
     assert "phi_system" not in row["reasons"]
+
+
+def test_trusted_band_is_range_specific_for_anchor_and_merge():
+    # Same module/frequency on two ranges. RANGE_4 has the full
+    # required resistor set and should be trusted. RANGE_2 is missing
+    # its own R1k anchor; the RANGE_4 anchor must not authorize it,
+    # and merge_trusted_flag must preserve the range-specific result.
+    f = 10000.0
+    cal_rows = []
+    raw_rows = []
+    for range_setting, loads in [
+        ("RANGE_4", TRUSTED_BAND_RESISTORS),
+        ("RANGE_2", ("R330_01", "R470_01")),
+    ]:
+        for load_id in loads:
+            cal_rows.append(_cal_row(
+                module_id="M1", load_id=load_id,
+                range_setting=range_setting, frequency_hz=f,
+                gain_factor=1.0e-6, repeat_cv_percent=0.1,
+            ))
+            r = {col: "" for col in RAW_CSV_COLUMNS}
+            r.update({
+                "session_id": "TEST",
+                "sweep_id": f"SWP_{range_setting}_{load_id}",
+                "row_type": "CAL",
+                "module_id": "M1",
+                "load_id": load_id,
+                "frequency_hz": str(f),
+                "real": "1000",
+                "imag": "0",
+                "status": "2",
+                "range_setting": range_setting,
+                "pga_setting": "X1",
+                "settling_cycles": "15",
+            })
+            raw_rows.append(r)
+    cal = pd.DataFrame(cal_rows, columns=CAL_CSV_COLUMNS)
+    raw = pd.DataFrame(raw_rows, columns=RAW_CSV_COLUMNS)
+
+    flags = evaluate_trusted_band(cal, raw)
+    assert list(flags.columns) == [
+        "module_id", "range_setting", "frequency_hz", "trusted", "reasons",
+    ]
+    r4_flag = flags[flags["range_setting"] == "RANGE_4"].iloc[0]
+    r2_flag = flags[flags["range_setting"] == "RANGE_2"].iloc[0]
+    assert bool(r4_flag["trusted"]) is True
+    assert bool(r2_flag["trusted"]) is False
+    assert "R1k_01" in r2_flag["reasons"]
+
+    merged = merge_trusted_flag(raw, flags)
+    r4_values = set(
+        merged.loc[merged["range_setting"] == "RANGE_4", "trusted_flag"]
+    )
+    r2_values = set(
+        merged.loc[merged["range_setting"] == "RANGE_2", "trusted_flag"]
+    )
+    assert r4_values == {"True"}
+    assert r2_values == {"False"}
+
+
+def test_g_sat_residuals_use_same_range_anchor():
+    # RANGE_2 uses a different absolute GF from RANGE_4, but each
+    # range's loads agree with its own anchor. Legacy global anchor
+    # lookup would compare RANGE_2 loads against the RANGE_4 anchor
+    # and fail; range-local lookup passes both ranges.
+    r4 = _full_cal_table(range_setting="RANGE_4", gf_value=1.0e-6)
+    r2 = _full_cal_table(range_setting="RANGE_2", gf_value=2.0e-6)
+    report = evaluate_g_sat(pd.concat([r4, r2], ignore_index=True))
+    assert report.verdict == GateVerdict.PASS
+    r2_primary = report.per_item[
+        (report.per_item["range_setting"] == "RANGE_2")
+        & (report.per_item["load_id"] == "R330_01")
+    ]
+    assert not r2_primary.empty
+    assert (r2_primary["residual_pct"].astype(float).abs() < 1e-12).all()
+
+
+def test_g_sat_failures_are_range_specific_for_trusted_band():
+    f = _FREQS[0]
+    r4_bad = _full_cal_table(
+        range_setting="RANGE_4", overrides={"R330_01": 1.20},
+    )
+    r2_clean = _full_cal_table(range_setting="RANGE_2")
+    sat_report = evaluate_g_sat(pd.concat([r4_bad, r2_clean], ignore_index=True))
+    failures = build_g_sat_failures(sat_report)
+    assert "range_setting" in failures.columns
+    assert set(failures["range_setting"].astype(str)) == {"RANGE_4"}
+
+    cal = pd.concat([
+        _full_cal_table(range_setting="RANGE_4"),
+        _full_cal_table(range_setting="RANGE_2"),
+    ], ignore_index=True)
+    raw_rows = []
+    for range_setting in ("RANGE_4", "RANGE_2"):
+        for load_id in TRUSTED_BAND_RESISTORS:
+            r = {col: "" for col in RAW_CSV_COLUMNS}
+            r.update({
+                "session_id": "TEST",
+                "sweep_id": f"SWP_{range_setting}_{load_id}",
+                "row_type": "CAL",
+                "module_id": "M1",
+                "load_id": load_id,
+                "frequency_hz": str(f),
+                "real": "1000",
+                "imag": "0",
+                "status": "2",
+                "range_setting": range_setting,
+                "pga_setting": "X1",
+                "settling_cycles": "15",
+            })
+            raw_rows.append(r)
+    raw = pd.DataFrame(raw_rows, columns=RAW_CSV_COLUMNS)
+    cal = cal[cal["frequency_hz"] == f]
+    flags = evaluate_trusted_band(cal, raw, g_sat_failures=failures)
+    r4_flag = flags[flags["range_setting"] == "RANGE_4"].iloc[0]
+    r2_flag = flags[flags["range_setting"] == "RANGE_2"].iloc[0]
+    assert bool(r4_flag["trusted"]) is False
+    assert "G-SAT failed" in r4_flag["reasons"]
+    assert bool(r2_flag["trusted"]) is True
+    assert "G-SAT failed" not in r2_flag["reasons"]
 
 
 # ---------------------------------------------------------------
@@ -947,6 +1069,32 @@ def test_g_lin_module_with_no_per_module_trusted_entry_is_not_evaluated():
     assert report.verdict == GateVerdict.NOT_EVALUATED
     not_eval_ids = [d["module_id"] for d in report.details["modules_not_evaluated"]]
     assert "M_B" in not_eval_ids
+
+
+def test_g_lin_trusted_csv_requires_same_freq_trusted_on_both_ranges(tmp_path: Path):
+    # The trusted-band CSV is now range-aware. A frequency trusted on
+    # RANGE_4 does not authorize the same module's RANGE_2 comparison
+    # unless that same frequency is also trusted on RANGE_2.
+    from eisight_logger.gates.g_lin import _trusted_freqs_from_csv
+
+    r4 = _full_cal_table(module_id="M_A", range_setting="RANGE_4")
+    r2 = _full_cal_table(module_id="M_A", range_setting="RANGE_2")
+    trusted = pd.DataFrame({
+        "module_id": ["M_A", "M_A"],
+        "range_setting": ["RANGE_4", "RANGE_2"],
+        "frequency_hz": [_FREQS[0], _FREQS[1]],
+        "trusted_flag": ["True", "True"],
+    })
+    p = tmp_path / "trusted_range_specific.csv"
+    trusted.to_csv(p, index=False)
+
+    report = evaluate_g_lin(
+        r4, r2, trusted_band_freqs=_trusted_freqs_from_csv(p),
+    )
+    assert report.verdict == GateVerdict.NOT_EVALUATED
+    not_eval = report.details["modules_not_evaluated"][0]
+    assert not_eval["module_id"] == "M_A"
+    assert "no overlapping frequencies" in not_eval["reason"]
 
 
 def test_g_lin_trusted_band_csv_without_module_id_fails_closed(tmp_path: Path):

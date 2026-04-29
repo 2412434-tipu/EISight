@@ -45,10 +45,11 @@ so the per-frequency residual collapses to
 real/imag -- the §I.6 calibration table already holds GF per
 load.
 
-The trusted band is module-level (per §H.5): all loads at a
-given (module, frequency) share the same boolean. Per-row
-trusted_flag is the literal "True"/"False"/"" string per the
-§I.5/§I.6 convention locked in raw_writer.py.
+The trusted band is module/range-level (per the §I.6 calibration
+contract): all loads at a given (module, range, frequency) share
+the same boolean. Per-row trusted_flag is the literal
+"True"/"False"/"" string per the §I.5/§I.6 convention locked in
+raw_writer.py.
 
 Implements: §H.5 (trusted-band selection), §H.4 (default
 thresholds), §H.8 (status / saturation / phase-jump rules),
@@ -86,7 +87,8 @@ TRUSTED_BAND_PHASE_JUMP_DEG = 10.0  # §H.8
 TRUSTED_BAND_RESISTORS: Tuple[str, ...] = ("R330_01", "R470_01", "R1k_01")
 TRUSTED_BAND_ANCHOR_LOAD_ID = "R1k_01"
 
-_FLAG_COLUMNS = ["module_id", "frequency_hz", "trusted", "reasons"]
+_KEY_COLUMNS = ["module_id", "range_setting", "frequency_hz"]
+_FLAG_COLUMNS = _KEY_COLUMNS + ["trusted", "reasons"]
 
 
 def evaluate_trusted_band(
@@ -101,23 +103,24 @@ def evaluate_trusted_band(
     phase_jump_deg_max: float = TRUSTED_BAND_PHASE_JUMP_DEG,
     g_sat_failures: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
-    """Evaluate per-(module_id, frequency_hz) §H.5 band membership.
+    """Evaluate per-(module_id, range_setting, frequency_hz) §H.5 band membership.
 
     cal_df is a §I.6 calibration table (calibration.CAL_CSV_COLUMNS).
     raw_df is a §I.5 raw long-format table
     (raw_writer.RAW_CSV_COLUMNS).
 
     g_sat_failures, when supplied, must have columns
-    (module_id, frequency_hz, load_id) -- one row per
-    G-SAT-flagged (module, freq, load) triple, as produced by
-    gates.py. A frequency appearing for any band_resistor is
-    marked untrusted with reason 'G-SAT failed'. Pass None
-    while gates.py has not yet been wired -- criterion 7 is
-    silently skipped.
+    (module_id, range_setting, frequency_hz, load_id) -- one row
+    per G-SAT-flagged (module, range, freq, load) quadruple, as
+    produced by gates.py. A frequency appearing for any
+    band_resistor in the same range is marked untrusted with
+    reason 'G-SAT failed'. Pass None while gates.py has not yet
+    been wired -- criterion 7 is silently skipped.
 
-    Returns a DataFrame with columns (module_id, frequency_hz,
-    trusted, reasons). Use trusted_flags_to_str + merge_trusted_flag
-    to push the result back into raw.csv and calibration.csv.
+    Returns a DataFrame with columns (module_id, range_setting,
+    frequency_hz, trusted, reasons). Use trusted_flags_to_str +
+    merge_trusted_flag to push the result back into raw.csv and
+    calibration.csv.
     """
     if anchor_load_id not in band_resistors:
         raise ValueError(
@@ -132,9 +135,17 @@ def evaluate_trusted_band(
         return pd.DataFrame(columns=_FLAG_COLUMNS)
 
     out_rows = []
-    for module_id, mod_grid in grid.groupby("module_id", sort=True):
-        cal_mod = cal[cal["module_id"] == module_id]
-        raw_mod = raw[raw["module_id"] == module_id]
+    for (module_id, range_setting), mod_grid in grid.groupby(
+        ["module_id", "range_setting"], sort=True
+    ):
+        cal_mod = cal[
+            (cal["module_id"] == module_id)
+            & (cal["range_setting"] == range_setting)
+        ]
+        raw_mod = raw[
+            (raw["module_id"] == module_id)
+            & (raw["range_setting"] == range_setting)
+        ]
 
         phase_jump_freqs = _phase_jump_freqs(
             cal_mod, band_resistors, phase_jump_deg_max
@@ -145,7 +156,7 @@ def evaluate_trusted_band(
             anchor_rows["gain_factor"].astype(float),
         ))
         g_sat_freqs = _g_sat_freqs_for(
-            g_sat_failures, module_id, band_resistors
+            g_sat_failures, module_id, range_setting, band_resistors
         )
 
         for freq in sorted(mod_grid["frequency_hz"].unique().tolist()):
@@ -182,6 +193,7 @@ def evaluate_trusted_band(
 
             out_rows.append({
                 "module_id": module_id,
+                "range_setting": range_setting,
                 "frequency_hz": freq,
                 "trusted": len(reasons) == 0,
                 "reasons": "; ".join(reasons),
@@ -192,6 +204,7 @@ def evaluate_trusted_band(
 
 def _coerce_cal(cal_df: pd.DataFrame) -> pd.DataFrame:
     cal = cal_df.copy()
+    _ensure_range_setting(cal)
     for col in ("frequency_hz", "gain_factor", "phase_system_deg"):
         cal[col] = pd.to_numeric(cal[col], errors="raise")
     cal["repeat_cv_percent"] = pd.to_numeric(
@@ -202,6 +215,7 @@ def _coerce_cal(cal_df: pd.DataFrame) -> pd.DataFrame:
 
 def _coerce_raw(raw_df: pd.DataFrame) -> pd.DataFrame:
     raw = raw_df[raw_df["row_type"] == "CAL"].copy()
+    _ensure_range_setting(raw)
     if raw.empty:
         return raw
     for col in ("real", "imag", "frequency_hz", "status"):
@@ -210,16 +224,16 @@ def _coerce_raw(raw_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _build_grid(cal: pd.DataFrame, raw: pd.DataFrame) -> pd.DataFrame:
-    cal_grid = cal[["module_id", "frequency_hz"]].drop_duplicates()
+    cal_grid = cal[_KEY_COLUMNS].drop_duplicates()
     raw_grid = (
-        raw[["module_id", "frequency_hz"]].drop_duplicates()
+        raw[_KEY_COLUMNS].drop_duplicates()
         if not raw.empty
-        else pd.DataFrame(columns=["module_id", "frequency_hz"])
+        else pd.DataFrame(columns=_KEY_COLUMNS)
     )
     return (
         pd.concat([cal_grid, raw_grid], ignore_index=True)
         .drop_duplicates()
-        .sort_values(["module_id", "frequency_hz"])
+        .sort_values(_KEY_COLUMNS)
         .reset_index(drop=True)
     )
 
@@ -251,13 +265,20 @@ def _phase_jump_freqs(
 def _g_sat_freqs_for(
     g_sat_failures: Optional[pd.DataFrame],
     module_id: str,
+    range_setting: str,
     band_resistors: Tuple[str, ...],
 ) -> Set[float]:
     # Consumes the schema defined in gates.g_sat.G_SAT_FAILURE_COLUMNS.
     if g_sat_failures is None:
         return set()
+    if "range_setting" not in g_sat_failures.columns:
+        raise ValueError(
+            "G-SAT failures table lacks 'range_setting'; trusted-band "
+            "cannot safely apply range-specific G-SAT exclusions"
+        )
     gsf = g_sat_failures[
         (g_sat_failures["module_id"] == module_id)
+        & (g_sat_failures["range_setting"] == range_setting)
         & (g_sat_failures["load_id"].isin(band_resistors))
     ]
     return set(
@@ -367,24 +388,43 @@ def trusted_flags_to_str(trusted: pd.Series) -> pd.Series:
 def merge_trusted_flag(
     target_df: pd.DataFrame, flags_df: pd.DataFrame
 ) -> pd.DataFrame:
-    """Set trusted_flag on target_df via (module_id, frequency_hz) join.
+    """Set trusted_flag on target_df via the trusted-band key join.
 
     target_df is either a §I.5 raw DataFrame or a §I.6 calibration
-    DataFrame; both have module_id and frequency_hz columns. The
-    trusted band is module-level per §H.5, so every row at a
-    given (module, freq) shares the same boolean.
+    DataFrame; current §I.5/§I.6 tables have module_id,
+    range_setting, and frequency_hz columns. The trusted band is
+    module/range-level, so every row at a given (module, range,
+    freq) shares the same boolean.
 
     Returns a new DataFrame; target_df is not mutated. Rows whose
-    (module_id, frequency_hz) is absent from flags_df get
+    trusted-band key is absent from flags_df get
     trusted_flag = '' (the not-yet-evaluated marker).
     """
     out = target_df.copy()
     out["frequency_hz"] = pd.to_numeric(out["frequency_hz"], errors="coerce")
-    flags = flags_df[["module_id", "frequency_hz", "trusted"]].copy()
+    has_target_range = "range_setting" in out.columns
+    has_flags_range = "range_setting" in flags_df.columns
+    if has_target_range != has_flags_range:
+        raise ValueError(
+            "trusted_flag merge cannot mix range-aware and range-less "
+            "tables; include range_setting on both sides"
+        )
+    join_cols = list(_KEY_COLUMNS if has_target_range else ["module_id", "frequency_hz"])
+    if has_target_range:
+        out["range_setting"] = out["range_setting"].fillna("").astype(str)
+    flags = flags_df[join_cols + ["trusted"]].copy()
     flags["frequency_hz"] = flags["frequency_hz"].astype(float)
-    merged = out.merge(flags, on=["module_id", "frequency_hz"], how="left")
+    if "range_setting" in flags.columns:
+        flags["range_setting"] = flags["range_setting"].fillna("").astype(str)
+    merged = out.merge(flags, on=join_cols, how="left")
     merged["trusted_flag"] = trusted_flags_to_str(merged["trusted"])
     return merged.drop(columns=["trusted"])
+
+
+def _ensure_range_setting(df: pd.DataFrame) -> None:
+    if "range_setting" not in df.columns:
+        df["range_setting"] = ""
+    df["range_setting"] = df["range_setting"].fillna("").astype(str)
 
 
 def run_trusted_band(

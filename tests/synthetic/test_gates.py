@@ -48,6 +48,7 @@ _NOMINAL = {
 def _cal_table(
     module_id: str = "AD5933-A-DIRECT",
     *,
+    range_setting: str = "RANGE_4",
     gf_value: float = 1.0e-6,
     overrides: dict | None = None,
 ) -> pd.DataFrame:
@@ -65,7 +66,8 @@ def _cal_table(
         for f in _FREQS:
             rows.append({
                 "session_id": "TEST", "module_id": module_id,
-                "load_id": load_id, "nominal_ohm": _NOMINAL[load_id],
+                "load_id": load_id, "range_setting": range_setting,
+                "nominal_ohm": _NOMINAL[load_id],
                 "actual_ohm": _NOMINAL[load_id], "dmm_model": "",
                 "dmm_accuracy_class_pct": "",
                 "frequency_hz": f, "gain_factor": gf_value * mult,
@@ -203,7 +205,7 @@ def test_g_sat_informational_load_does_not_promote_failure():
 
 def test_g_lin_passes_when_ranges_agree():
     r4 = _cal_table()
-    r2 = _cal_table()
+    r2 = _cal_table(range_setting="RANGE_2")
     report = evaluate_g_lin(r4, r2)
     assert report.verdict == GateVerdict.PASS
 
@@ -212,7 +214,7 @@ def test_g_lin_fails_when_ranges_diverge():
     # Bump R470 GF by 5% on Range 2 only; |Z|_R2 = R * GF_R2 / GF_anchor
     # differs from |Z|_R4 by ~5% > 2% threshold -> FAIL.
     r4 = _cal_table()
-    r2 = _cal_table(overrides={"R470_01": 1.05})
+    r2 = _cal_table(range_setting="RANGE_2", overrides={"R470_01": 1.05})
     report = evaluate_g_lin(r4, r2)
     assert report.verdict == GateVerdict.FAIL
 
@@ -220,7 +222,7 @@ def test_g_lin_fails_when_ranges_diverge():
 def test_g_lin_trusted_band_freqs_restricts_evaluation():
     # Force a single bad frequency on R2; without restriction -> FAIL.
     r4 = _cal_table()
-    r2 = _cal_table()
+    r2 = _cal_table(range_setting="RANGE_2")
     # Bump only the first frequency on R2 R470 by 5%.
     mask = (r2["load_id"] == "R470_01") & (r2["frequency_hz"] == _FREQS[0])
     r2.loc[mask, "gain_factor"] = float(r2.loc[mask, "gain_factor"].iloc[0]) * 1.05
@@ -290,14 +292,15 @@ def test_run_g_sat_writes_failures_csv_with_locked_columns(tmp_path: Path):
 def test_run_g_lin_via_trusted_band_csv(tmp_path: Path):
     """run_g_lin reads the merged §I.5/§I.6 CSV's trusted_flag=='True' rows."""
     r4 = _cal_table()
-    r2 = _cal_table()
+    r2 = _cal_table(range_setting="RANGE_2")
     r4_path = tmp_path / "cal_r4.csv"
     r2_path = tmp_path / "cal_r2.csv"
     r4.to_csv(r4_path, index=False)
     r2.to_csv(r2_path, index=False)
 
-    # Build a merged-style CSV that marks every frequency 'True'.
-    merged = r4.copy()
+    # Build a merged-style CSV that marks every frequency 'True'
+    # independently on both ranges.
+    merged = pd.concat([r4, r2], ignore_index=True)
     merged["trusted_flag"] = "True"
     tb_path = tmp_path / "trusted_band.csv"
     merged.to_csv(tb_path, index=False)
