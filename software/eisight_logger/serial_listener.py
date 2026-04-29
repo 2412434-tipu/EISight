@@ -49,6 +49,7 @@ from eisight_logger.schemas import parse_line
 # Single source of truth for both listen_serial()'s default and
 # the --baud argparse default.
 DEFAULT_BAUD = 921600
+LISTEN_ROW_TYPES = ("CAL", "SAMPLE", "BLANK")
 
 
 class ListenerStats:
@@ -119,6 +120,8 @@ def listen_serial(
     operator: str = "",
     sample_id: str = "",
     notes: str = "",
+    row_type: Optional[str] = None,
+    load_id: Optional[str] = None,
 ) -> ListenerStats:
     """Open `port` at `baud`, write data/real/<session_id>/raw.{jsonl,csv}.
 
@@ -142,6 +145,8 @@ def listen_serial(
             operator=operator,
             sample_id=sample_id,
             notes=notes,
+            row_type=row_type,
+            load_id=load_id,
         )
 
 
@@ -152,6 +157,8 @@ def replay_file(
     operator: str = "",
     sample_id: str = "",
     notes: str = "",
+    row_type: Optional[str] = None,
+    load_id: Optional[str] = None,
 ) -> ListenerStats:
     """Read a captured JSONL file and emit raw.{jsonl,csv} as if from the wire."""
     return _run(
@@ -161,6 +168,8 @@ def replay_file(
         operator=operator,
         sample_id=sample_id,
         notes=notes,
+        row_type=row_type,
+        load_id=load_id,
     )
 
 
@@ -194,7 +203,10 @@ def _run(
     operator: str,
     sample_id: str,
     notes: str,
+    row_type: Optional[str],
+    load_id: Optional[str],
 ) -> ListenerStats:
+    _validate_annotations(row_type)
     session_dir = output_root / session_id
     session_dir.mkdir(parents=True, exist_ok=True)
     raw_path = session_dir / "raw.jsonl"
@@ -214,6 +226,8 @@ def _run(
         sample_id=sample_id,
         notes=notes,
         session_id=session_id,
+        row_type_override=row_type,
+        load_id_override=load_id,
     )
     try:
         for line in lines:
@@ -244,6 +258,12 @@ def _run(
     stats.point_count_mismatch = csv_writer.point_count_mismatch_count
     _print_summary(stats, raw_path, csv_path)
     return stats
+
+
+def _validate_annotations(row_type: Optional[str]) -> None:
+    if row_type is not None and row_type not in LISTEN_ROW_TYPES:
+        allowed = ", ".join(LISTEN_ROW_TYPES)
+        raise ValueError(f"row_type must be one of {allowed} (got {row_type!r})")
 
 
 def _print_failure(exc: ValidationError, lineno: int) -> None:
@@ -328,6 +348,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         "--notes", default="",
         help="Free-form notes, written to every CSV row's notes column.",
     )
+    parser.add_argument(
+        "--row-type", choices=LISTEN_ROW_TYPES, default=None,
+        help=(
+            "Optional CSV row_type annotation override. If omitted, "
+            "the firmware-provided row_type is preserved."
+        ),
+    )
+    parser.add_argument(
+        "--load-id", default=None,
+        help=(
+            "Optional CSV load_id annotation override. If omitted, "
+            "the firmware-provided load_id is preserved."
+        ),
+    )
     args = parser.parse_args(argv)
 
     if args.port is not None:
@@ -339,6 +373,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             operator=args.operator,
             sample_id=args.sample_id,
             notes=args.notes,
+            row_type=args.row_type,
+            load_id=args.load_id,
         )
     else:
         if not args.replay.is_file():
@@ -350,6 +386,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             operator=args.operator,
             sample_id=args.sample_id,
             notes=args.notes,
+            row_type=args.row_type,
+            load_id=args.load_id,
         )
     return 0 if stats.is_clean() else 1
 

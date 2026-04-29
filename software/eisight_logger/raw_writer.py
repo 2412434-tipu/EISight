@@ -173,6 +173,8 @@ class RawCsvWriter:
         sample_id: str = "",
         notes: str = "",
         session_id: Optional[str] = None,
+        row_type_override: Optional[str] = None,
+        load_id_override: Optional[str] = None,
     ) -> None:
         self.path = Path(path)
         self.operator = operator
@@ -181,6 +183,8 @@ class RawCsvWriter:
         # If session_id is supplied, it overrides the firmware's
         # empty-string emission. The listener owns this decision.
         self.session_id_override = session_id
+        self.row_type_override = row_type_override
+        self.load_id_override = load_id_override
         self._buffer: Optional[_SweepBuffer] = None
         self.dropped_data_count = 0
         # Typed sequence-safety counters (see class docstring).
@@ -286,12 +290,20 @@ class RawCsvWriter:
         row.update({
             "session_id": session_id,
             "sweep_id": rec.sweep_id,
-            "row_type": meta.row_type,
+            "row_type": (
+                self.row_type_override
+                if self.row_type_override is not None
+                else meta.row_type
+            ),
             # module_id may be None at this point -- emit empty cell.
             "module_id": meta.module_id or "",
             "cell_id": meta.cell_id,
             "sample_id": self.sample_id,
-            "load_id": meta.load_id,
+            "load_id": (
+                self.load_id_override
+                if self.load_id_override is not None
+                else meta.load_id
+            ),
             # Float precisions match firmware snprintf templates so
             # the CSV is byte-comparable to the JSONL field values.
             "frequency_hz": _fmt_float(rec.frequency_hz, 1),
