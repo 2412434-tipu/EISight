@@ -75,13 +75,33 @@ eisight-logger plot --type raw-dft --raw raw.csv \
     --range-setting RANGE_4 --load-id R1k_01
 ```
 
+## Real replay annotation
+
+Current real firmware captures can carry blank `row_type` and
+`load_id` fields in `sweep_begin`. The listener can annotate the
+CSV at ingest time while preserving the captured JSONL payload
+verbatim:
+
+```
+eisight-logger listen --session-id CAL_R1K_01 \
+    --replay /tmp/real/r1k.jsonl --output-root /tmp/real/data \
+    --row-type CAL --load-id R1k_01
+```
+
+`--row-type` accepts `CAL`, `SAMPLE`, or `BLANK`. If `--row-type`
+or `--load-id` is omitted, the firmware-provided value is
+preserved. The listener does not infer labels from filenames,
+sample IDs, or session IDs.
+
 ## End-to-end walk-through (synthetic data, no hardware)
 
 This sequence runs from a fresh checkout against the synthetic
-ideal-resistor fixture in `tests/synthetic/`. It exercises every
-implemented stage and is the easiest way to confirm an editable
-install is working end-to-end. All commands are run from the
-repo root.
+ideal-resistor fixture in `tests/synthetic/`. It is a pipeline
+smoke test for ingest, validation, permissive calibration, QC,
+trusted-band plumbing, and report writing. A single R1k trace is
+not full §F.10 bench evidence: strict calibration, G-SAT, and
+G-LIN require the required loads, repeats, and ranges. All commands
+are run from the repo root.
 
 ```
 # 1) Generate an ideal-resistor JSONL trace (1 kΩ, 96-point sweep
@@ -102,15 +122,15 @@ eisight-logger listen --session-id WALK \
 # -> listener summary: lines=99 failed=0 records=99 dropped_data=0
 # -> raw.csv:   /tmp/walk/data/WALK/raw.csv
 
-# 4) Build the §I.6 calibration table. The inventory CSV maps each
-#    load_id to its metrology (nominal + measured ohm; lab DMM
-#    columns optional per §F.7 G-DMMx).
+# 4) Build the §I.6 calibration table. This one-load smoke fixture
+#    uses --no-strict; bench calibration should stay strict and use
+#    the full required load/repeat evidence.
 cat > /tmp/walk/inventory.csv <<EOF
 load_id,nominal_ohm,measured_ohm
 R1k_01,1000,1000.0
 EOF
 eisight-logger calibrate /tmp/walk/data/WALK/raw.csv \
-    /tmp/walk/inventory.csv /tmp/walk/cal.csv
+    /tmp/walk/inventory.csv /tmp/walk/cal.csv --no-strict
 
 # 5) Run §H.8 / §H.7 per-row QC; populates qc_pass / qc_reasons
 #    on a copy of raw.csv with the locked "True"/"False"/""
@@ -125,9 +145,12 @@ eisight-logger trust /tmp/walk/data/WALK/raw.csv /tmp/walk/cal.csv \
     --raw-output /tmp/walk/raw_trusted.csv \
     --cal-output /tmp/walk/cal_trusted.csv
 
-# 7) Evaluate the §F.10.a saturation gate. Writes both .txt and
-#    .json reports to --output-dir; --fmt restricts to one if
-#    desired (text / json / both).
+# 7) Evaluate the §F.10.a saturation gate. With this single-R1k
+#    smoke fixture the report is expected to be NOT_EVALUATED and
+#    the CLI exits nonzero; a full F.10 calibration set is required
+#    for bench PASS/FAIL evidence. Writes both .txt and .json
+#    reports to --output-dir; --fmt restricts to one if desired
+#    (text / json / both).
 eisight-logger gate --type g_sat --cal /tmp/walk/cal.csv \
     --output-dir /tmp/walk/reports --fmt both
 # -> /tmp/walk/reports/g_sat.txt, /tmp/walk/reports/g_sat.json
@@ -268,7 +291,7 @@ under the hood and round-trips numpy booleans unchanged.
 | `phase.py`          | §H.2                | DFT magnitude / phase primitives       |
 | `calibration.py`    | §H.2, §I.6, §F.7    | GF / system phase + inventory loader   |
 | `qc.py`             | §H.7, §H.8          | Per-row QC with locked encoding        |
-| `trusted_band.py`   | §H.5                | Per-(module, freq) band membership     |
+| `trusted_band.py`   | §H.5                | Per-(module_id, range_setting, frequency_hz) band membership |
 | `gates/`            | §E.11, §F.10.a/b    | G-DC3, G-SAT, G-LIN evaluators         |
 | `cli.py`            | (all of the above)  | Thin argparse routing                  |
 

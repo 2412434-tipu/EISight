@@ -50,6 +50,7 @@ from eisight_logger.qc import (
 )
 from eisight_logger.serial_listener import (
     DEFAULT_BAUD,
+    LISTEN_ROW_TYPES,
     listen_serial,
     replay_file,
 )
@@ -101,6 +102,17 @@ def _add_listen(sub) -> None:
     p.add_argument("--operator", default="")
     p.add_argument("--sample-id", default="")
     p.add_argument("--notes", default="")
+    p.add_argument(
+        "--row-type", choices=LISTEN_ROW_TYPES, default=None,
+        help=(
+            "Optional CSV row_type annotation override. Accepted values: "
+            f"{', '.join(LISTEN_ROW_TYPES)}."
+        ),
+    )
+    p.add_argument(
+        "--load-id", default=None,
+        help="Optional CSV load_id annotation override.",
+    )
     p.set_defaults(handler=_cmd_listen)
 
 
@@ -227,6 +239,7 @@ def _cmd_listen(args) -> int:
     kw = dict(
         session_id=args.session_id, output_root=args.output_root,
         operator=args.operator, sample_id=args.sample_id, notes=args.notes,
+        row_type=args.row_type, load_id=args.load_id,
     )
     if args.port is not None:
         stats = listen_serial(port=args.port, baud=args.baud, **kw)
