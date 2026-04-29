@@ -76,9 +76,13 @@ def evaluate_g_lin(
     one per-item row per (module, frequency_hz) evaluation.
 
     trusted_band_freqs accepts either:
+      - a Mapping[module_id, Mapping[range_setting, Iterable[float]]]
+        (the bench-safe form produced by run_g_lin from a
+        range-aware trusted-band CSV -- a frequency must be trusted
+        in both input ranges for the module);
       - a Mapping[module_id, Iterable[float]] (the bench-safe
-        form -- per-module trusted set; a frequency trusted on
-        Module A does NOT authorize that frequency for Module B);
+        legacy form -- per-module trusted set; a frequency trusted
+        on Module A does NOT authorize that frequency for Module B);
       - or a flat Iterable[float] (back-compat for single-module
         library tests; applied globally across modules).
 
@@ -121,10 +125,20 @@ def evaluate_g_lin(
     r4 = _coerce(cal_r4_df)
     r2 = _coerce(cal_r2_df)
 
-    per_module_freqs, eval_freqs = _normalize_trusted_freqs(trusted_band_freqs)
+    (
+        per_module_range_freqs,
+        per_module_freqs,
+        eval_freqs,
+    ) = _normalize_trusted_freqs(trusted_band_freqs)
     if (
+        per_module_range_freqs is not None
+        and not per_module_range_freqs
+        and per_module_freqs is None
+        and eval_freqs is None
+    ) or (
         per_module_freqs is not None
         and not per_module_freqs
+        and per_module_range_freqs is None
         and eval_freqs is None
     ) or (eval_freqs is not None and not eval_freqs):
         return GateReport(
@@ -165,6 +179,8 @@ def evaluate_g_lin(
 
         r4_mod = r4[r4["module_id"].astype(str) == module_id]
         r2_mod = r2[r2["module_id"].astype(str) == module_id]
+        r4_ranges = set(r4_mod["range_setting"].astype(str).unique())
+        r2_ranges = set(r2_mod["range_setting"].astype(str).unique())
         r4_loads = set(r4_mod["load_id"].astype(str).unique())
         r2_loads = set(r2_mod["load_id"].astype(str).unique())
         missing_in_r4 = [
@@ -197,7 +213,8 @@ def evaluate_g_lin(
         # on Module A is NOT authorized for Module B. Pure-iterable
         # back-compat applies the same set globally.
         module_eval_freqs = _resolve_module_freqs(
-            module_id, per_module_freqs, eval_freqs,
+            module_id, r4_ranges, r2_ranges,
+            per_module_range_freqs, per_module_freqs, eval_freqs,
         )
         if module_eval_freqs is not None:
             common_freqs = [f for f in common_freqs if f in module_eval_freqs]
@@ -279,9 +296,14 @@ def evaluate_g_lin(
         "max_diff_pct": float(per_item["diff_pct"].max()),
         "evaluated_freq_count": int(len(per_item)),
         "trusted_band_restricted": (
-            per_module_freqs is not None or eval_freqs is not None
+            per_module_range_freqs is not None
+            or per_module_freqs is not None
+            or eval_freqs is not None
         ),
-        "trusted_band_per_module": per_module_freqs is not None,
+        "trusted_band_per_module": (
+            per_module_range_freqs is not None or per_module_freqs is not None
+        ),
+        "trusted_band_range_aware": per_module_range_freqs is not None,
         "module_universe": module_universe,
         "modules_evaluated": sorted(modules_evaluated),
         "modules_not_evaluated": [
@@ -301,6 +323,9 @@ def evaluate_g_lin(
 
 def _coerce(cal_df: pd.DataFrame) -> pd.DataFrame:
     out = cal_df.copy()
+    if "range_setting" not in out.columns:
+        out["range_setting"] = ""
+    out["range_setting"] = out["range_setting"].fillna("").astype(str)
     for col in ("frequency_hz", "gain_factor", "actual_ohm"):
         out[col] = pd.to_numeric(out[col], errors="raise")
     return out
@@ -349,28 +374,49 @@ def _r_test_actual(
 
 def _normalize_trusted_freqs(
     trusted_band_freqs,
-) -> Tuple[Optional[Dict[str, Set[float]]], Optional[Set[float]]]:
-    """Normalize the trusted_band_freqs argument into (per_module, global).
+) -> Tuple[
+    Optional[Dict[str, Dict[str, Set[float]]]],
+    Optional[Dict[str, Set[float]]],
+    Optional[Set[float]],
+]:
+    """Normalize trusted_band_freqs into (module/range, module, global).
 
-    Exactly one of the two outputs is non-None when the caller
-    supplied a value: a Mapping yields per_module (the bench-safe
-    form), an Iterable yields global (back-compat). None passes
-    through unchanged.
+    Exactly one output is non-None when the caller supplied a
+    value: a nested Mapping yields per-module/per-range (the
+    bench-safe CSV form), a flat Mapping yields per_module, and an
+    Iterable yields global (back-compat). None passes through
+    unchanged.
     """
     if trusted_band_freqs is None:
-        return None, None
+        return None, None, None
     if isinstance(trusted_band_freqs, Mapping):
+        if any(isinstance(v, Mapping) for v in trusted_band_freqs.values()):
+            per_module_range: Dict[str, Dict[str, Set[float]]] = {}
+            for module_id, by_range in trusted_band_freqs.items():
+                if not isinstance(by_range, Mapping):
+                    raise ValueError(
+                        "trusted_band_freqs cannot mix range-aware and "
+                        "range-less module entries"
+                    )
+                per_module_range[str(module_id)] = {
+                    str(range_setting): {float(f) for f in freqs}
+                    for range_setting, freqs in by_range.items()
+                }
+            return per_module_range, None, None
         per_module: Dict[str, Set[float]] = {
             str(k): {float(f) for f in v}
             for k, v in trusted_band_freqs.items()
         }
-        return per_module, None
+        return None, per_module, None
     flat = {float(f) for f in trusted_band_freqs}
-    return None, flat
+    return None, None, flat
 
 
 def _resolve_module_freqs(
     module_id: str,
+    r4_ranges: Set[str],
+    r2_ranges: Set[str],
+    per_module_range_freqs: Optional[Dict[str, Dict[str, Set[float]]]],
     per_module_freqs: Optional[Dict[str, Set[float]]],
     eval_freqs: Optional[Set[float]],
 ) -> Optional[Set[float]]:
@@ -383,6 +429,18 @@ def _resolve_module_freqs(
     trusted band authorize Module B by accident, which is
     exactly the bug the audit flagged.
     """
+    if per_module_range_freqs is not None:
+        by_range = per_module_range_freqs.get(module_id, {})
+        required_ranges = sorted(r4_ranges | r2_ranges)
+        if not required_ranges:
+            return set()
+        freq_sets = []
+        for range_setting in required_ranges:
+            freqs = by_range.get(range_setting)
+            if not freqs:
+                return set()
+            freq_sets.append(set(freqs))
+        return set.intersection(*freq_sets) if freq_sets else set()
     if per_module_freqs is not None:
         return per_module_freqs.get(module_id, set())
     return eval_freqs
@@ -390,23 +448,24 @@ def _resolve_module_freqs(
 
 def _trusted_freqs_from_csv(
     path: Union[Path, str],
-) -> Dict[str, Set[float]]:
+) -> Dict[str, Dict[str, Set[float]]]:
     """Per-module trusted-band frequencies from a merged §I.5/§I.6 CSV.
 
     Either of run_trusted_band's outputs (merged_raw, merged_cal)
-    works as input -- both carry module_id, frequency_hz, and the
-    "True"/"False"/"" trusted_flag encoding locked in
-    raw_writer.py. Returns ``{module_id: {frequency_hz, ...}}``
-    over rows whose trusted_flag == "True".
+    works as input -- both carry module_id, range_setting,
+    frequency_hz, and the "True"/"False"/"" trusted_flag encoding
+    locked in raw_writer.py. Returns
+    ``{module_id: {range_setting: {frequency_hz, ...}}}`` over
+    rows whose trusted_flag == "True".
 
     The §H.5 trusted band is module-level. A flat global frequency
     set would let a frequency trusted on Module A authorize that
     same frequency on Module B, which is unsafe -- per-module
     isolation is enforced by returning the dict.
 
-    Raises ValueError if the trusted-band CSV lacks the
-    ``module_id`` column entirely; that file cannot be safely
-    consumed by G-LIN under per-module isolation. The legacy
+    Raises ValueError if the trusted-band CSV lacks the ``module_id``
+    or ``range_setting`` column entirely; that file cannot be safely
+    consumed by G-LIN under module/range isolation. The legacy
     global-set form is intentionally not preserved as a fallback.
     """
     df = pd.read_csv(path, dtype=str, keep_default_na=False)
@@ -416,16 +475,24 @@ def _trusted_freqs_from_csv(
             "G-LIN requires per-module trusted-frequency isolation, "
             "so a global-set fallback is unsafe and not provided"
         )
+    if "range_setting" not in df.columns:
+        raise ValueError(
+            f"trusted-band CSV {path} lacks 'range_setting' column; "
+            "G-LIN requires range-aware trusted-frequency isolation"
+        )
     trusted_rows = df[df["trusted_flag"] == "True"]
     if trusted_rows.empty:
         return {}
-    out: Dict[str, Set[float]] = {}
+    out: Dict[str, Dict[str, Set[float]]] = {}
     freqs = pd.to_numeric(trusted_rows["frequency_hz"], errors="raise").astype(float)
-    for module_id, freq in zip(
+    for module_id, range_setting, freq in zip(
         trusted_rows["module_id"].astype(str).tolist(),
+        trusted_rows["range_setting"].fillna("").astype(str).tolist(),
         freqs.tolist(),
     ):
-        out.setdefault(module_id, set()).add(float(freq))
+        out.setdefault(module_id, {}).setdefault(range_setting, set()).add(
+            float(freq)
+        )
     return out
 
 

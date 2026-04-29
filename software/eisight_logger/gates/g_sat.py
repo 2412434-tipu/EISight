@@ -79,7 +79,9 @@ G_SAT_ANCHOR_LOAD_ID = "R1k_01"
 # Cross-module schema contract with trusted_band._g_sat_freqs_for.
 # Defined here so a column change is one edit; trusted_band.py
 # carries a comment pointer back to this constant.
-G_SAT_FAILURE_COLUMNS: List[str] = ["module_id", "frequency_hz", "load_id"]
+G_SAT_FAILURE_COLUMNS: List[str] = [
+    "module_id", "range_setting", "frequency_hz", "load_id",
+]
 
 
 def evaluate_g_sat(
@@ -103,11 +105,12 @@ def evaluate_g_sat(
     in informational_loads contribute per-item rows but do not
     affect the verdict.
 
-    Required-evidence contract: a module must carry the anchor
-    load AND every primary load to be evaluable. Missing the
-    anchor or any primary load yields module-level NOT_EVALUATED
-    rather than silent PASS. Empty cal table or zero evaluable
-    modules yields overall NOT_EVALUATED.
+    Required-evidence contract: each (module, range) present in
+    the calibration table must carry the anchor load AND every
+    primary load to be evaluable. Missing the anchor or any
+    primary load yields range-level NOT_EVALUATED rather than
+    silent PASS. Empty cal table or zero evaluable ranges yields
+    overall NOT_EVALUATED.
     """
     if cal_df.empty:
         return GateReport(
@@ -126,22 +129,29 @@ def evaluate_g_sat(
         )
 
     cal = cal_df.copy()
+    if "range_setting" not in cal.columns:
+        cal["range_setting"] = ""
+    cal["range_setting"] = cal["range_setting"].fillna("").astype(str)
     for col in ("frequency_hz", "gain_factor"):
         cal[col] = pd.to_numeric(cal[col], errors="raise")
 
     all_loads = tuple(primary_loads) + tuple(informational_loads)
     per_item_rows: List[dict] = []
-    modules_not_evaluated: List[Tuple[str, List[str]]] = []
-    modules_evaluated: List[str] = []
+    modules_not_evaluated: List[Tuple[str, str, List[str]]] = []
+    modules_evaluated: List[Tuple[str, str]] = []
 
-    for module_id, mod in cal.groupby("module_id", sort=True):
+    for (module_id, range_setting), mod in cal.groupby(
+        ["module_id", "range_setting"], sort=True
+    ):
         loads_present = set(mod["load_id"].astype(str).unique().tolist())
         required = (anchor_load_id,) + tuple(primary_loads)
         missing = [r for r in required if r not in loads_present]
         if missing:
-            modules_not_evaluated.append((str(module_id), sorted(missing)))
+            modules_not_evaluated.append((
+                str(module_id), str(range_setting), sorted(missing)
+            ))
             continue
-        modules_evaluated.append(str(module_id))
+        modules_evaluated.append((str(module_id), str(range_setting)))
 
         anchor_gf = (
             mod[mod["load_id"] == anchor_load_id]
@@ -172,6 +182,7 @@ def evaluate_g_sat(
                     )
                 per_item_rows.append({
                     "module_id": module_id,
+                    "range_setting": range_setting,
                     "load_id": load_id,
                     "frequency_hz": f,
                     "residual_pct": residual_pct,
@@ -197,8 +208,12 @@ def evaluate_g_sat(
                 "primary_loads": list(primary_loads),
                 "informational_loads": list(informational_loads),
                 "modules_not_evaluated": [
-                    {"module_id": m, "missing_loads": ls}
-                    for m, ls in modules_not_evaluated
+                    {
+                        "module_id": m,
+                        "range_setting": r,
+                        "missing_loads": ls,
+                    }
+                    for m, r, ls in modules_not_evaluated
                 ],
             },
             per_item=per_item,
@@ -206,13 +221,17 @@ def evaluate_g_sat(
 
     primary_verdicts: List[str] = []
     band_widths: dict = {}
-    for (module_id, load_id), grp in per_item[per_item["is_primary"]].groupby(
-        ["module_id", "load_id"], sort=True
+    for (module_id, range_setting, load_id), grp in per_item[
+        per_item["is_primary"]
+    ].groupby(
+        ["module_id", "range_setting", "load_id"], sort=True
     ):
         band_hz = _max_contiguous_pass_band_hz(
             grp.sort_values("frequency_hz"), pass_threshold_pct
         )
-        band_widths[f"{module_id}/{load_id}_max_pass_band_hz"] = band_hz
+        band_widths[
+            f"{module_id}/{range_setting}/{load_id}_max_pass_band_hz"
+        ] = band_hz
         primary_verdicts.append(
             GateVerdict.PASS.value
             if band_hz >= min_band_width_hz
@@ -244,7 +263,7 @@ def evaluate_g_sat(
     if modules_not_evaluated:
         summary += (
             f" -- modules NOT_EVALUATED: "
-            f"{[m for m, _ in modules_not_evaluated]}"
+            f"{[f'{m}/{r}' for m, r, _ in modules_not_evaluated]}"
         )
 
     details = {
@@ -253,10 +272,13 @@ def evaluate_g_sat(
         "informational_loads": list(informational_loads),
         "pass_threshold_pct": pass_threshold_pct,
         "min_band_width_hz": min_band_width_hz,
-        "modules_evaluated": sorted(modules_evaluated),
+        "modules_evaluated": [
+            {"module_id": m, "range_setting": r}
+            for m, r in sorted(modules_evaluated)
+        ],
         "modules_not_evaluated": [
-            {"module_id": m, "missing_loads": ls}
-            for m, ls in modules_not_evaluated
+            {"module_id": m, "range_setting": r, "missing_loads": ls}
+            for m, r, ls in modules_not_evaluated
         ],
         **band_widths,
     }
@@ -317,7 +339,8 @@ def build_g_sat_failures(
     informational-load failures as well.
 
     Schema is G_SAT_FAILURE_COLUMNS; consumed by
-    trusted_band._g_sat_freqs_for.
+    trusted_band._g_sat_freqs_for. The range_setting column is part
+    of the contract so a Range-4 G-SAT failure cannot taint Range 2.
     """
     if isinstance(report_or_per_item, GateReport):
         per_item = report_or_per_item.per_item
