@@ -32,8 +32,16 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
-from eisight_logger.calibration import run_calibration
-from eisight_logger.gates import run_g_dc3, run_g_lin, run_g_sat
+from eisight_logger.calibration import (
+    CalibrationStrictError,
+    run_calibration,
+)
+from eisight_logger.gates import (
+    run_g_dc3,
+    run_g_lin,
+    run_g_sat,
+    verdict_is_pass,
+)
 from eisight_logger.qc import (
     QC_PHASE_JUMP_DEG,
     QC_TEMP_DRIFT_C,
@@ -108,7 +116,18 @@ def _add_calibrate(sub) -> None:
     p.add_argument("inventory_path", type=Path)
     p.add_argument("output_path", type=Path)
     p.add_argument("--session-id", default=None)
-    p.set_defaults(handler=_cmd_calibrate)
+    # Bench-CLI default is strict (fail-closed); callers that need
+    # the permissive library behavior (notebooks, partial fixtures)
+    # opt out explicitly with --no-strict.
+    p.add_argument(
+        "--no-strict", dest="strict", action="store_false",
+        help=(
+            "Disable bench strictness: empty CAL / missing actuals "
+            "/ under-replicated F.10 groups become silent skips "
+            "rather than CalibrationStrictError. Library/notebook use only."
+        ),
+    )
+    p.set_defaults(handler=_cmd_calibrate, strict=True)
 
 
 def _add_qc(sub) -> None:
@@ -196,7 +215,11 @@ def _cmd_listen(args) -> int:
         if not args.replay.is_file():
             raise SystemExit(f"not a file: {args.replay}")
         stats = replay_file(path=args.replay, **kw)
-    return 1 if stats.lines_failed > 0 else 0
+    # Sequence-safety: dropped/duplicate/non-monotonic data records,
+    # missing sweep_end, sweep_end.error, or point-count mismatches
+    # all flip exit to non-zero so the bench workflow does not let
+    # partial / error sweeps flow into calibration as valid evidence.
+    return 0 if stats.is_clean() else 1
 
 
 def _cmd_validate(args) -> int:
@@ -207,10 +230,18 @@ def _cmd_validate(args) -> int:
 
 
 def _cmd_calibrate(args) -> int:
-    run_calibration(
-        args.raw_path, args.inventory_path, args.output_path,
-        session_id=args.session_id,
-    )
+    try:
+        run_calibration(
+            args.raw_path, args.inventory_path, args.output_path,
+            session_id=args.session_id,
+            strict=args.strict,
+        )
+    except CalibrationStrictError as exc:
+        # Fail-closed bench behavior: surface the strictness violation
+        # to stderr and exit non-zero so the operator sees the missing
+        # evidence instead of an empty / misleading cal table.
+        print(f"calibration strict failure: {exc}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -248,7 +279,12 @@ def _cmd_gate(args) -> int:
             args.cal_r4, args.cal_r2, args.output_dir,
             args.trusted_band_csv, fmt=args.fmt,
         )
-    return 1 if report.verdict.value == "FAIL" else 0
+    # Bench exit-code: PASS -> 0; WARN, FAIL, NOT_EVALUATED -> 1.
+    # NOT_EVALUATED is intentionally non-zero so missing evidence
+    # cannot be misread as "gate succeeded with no data" in CI.
+    # Report artifacts on disk preserve the four-way distinction.
+    print(f"{report.gate_id}: {report.verdict.value}")
+    return 0 if verdict_is_pass(report.verdict) else 1
 
 
 def _cmd_plot(args) -> int:

@@ -10,15 +10,29 @@ from CAL sweeps (v4.0c §H.2, §I.6).
 
 build_calibration_table turns the §I.5 raw CSV (filtered to
 row_type == 'CAL') into the §I.6 calibration CSV: one row per
-(module_id, load_id, frequency_hz). For each (module_id, load_id,
-frequency) the F.10 three-repeat sweeps are pooled by averaging
-real and imag across sweep_ids first; magnitude and system phase
-are then computed from the pooled values. Pooling DFT samples
+(module_id, range_setting, load_id, frequency_hz) -- the
+range_setting key is part of the grouping so Range 2 and Range 4
+sweeps are NEVER averaged together (the AD5933 gain factor is
+range-dependent per datasheet Table 17, so pooling across
+ranges silently destroys G-LIN's precondition). For each group
+the F.10 three-repeat sweeps are pooled by averaging real and
+imag across sweep_ids first; magnitude and system phase are
+then computed from the pooled values. Pooling DFT samples
 before computing features avoids the mean-of-atan2 wraparound
 trap that mean(phi_per_repeat) would hit. repeat_cv_percent is
 std(M_per_repeat) / mean(M_per_repeat) * 100 with ddof=1,
 matching the §H.4 "Within-session CV on resistor magnitude"
 metric.
+
+Strict bench mode (`strict=True`, default for the CLI calibrate
+subcommand): refuses to silently fall through when evidence is
+insufficient. Specifically it raises CalibrationStrictError on
+empty CAL slices, missing actuals for any required F.10 load,
+or any (module, range, load, freq) group that arrived with
+fewer than required_repeats sweeps. Library callers (notebooks,
+synthetic-pipeline tests) keep the permissive default so a
+partial fixture is not gratuitously rejected; the bench
+workflow must always pass strict=True.
 
 phi_system_deg is degrees-converted directly off the per-load
 atan2 output -- no unwrap inside this module. The §H.2 unwrap
@@ -44,7 +58,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Optional, Union
+from typing import Dict, Iterable, Optional, Tuple, Union
 
 import numpy as np
 import pandas as pd
@@ -55,11 +69,15 @@ from eisight_logger.phase import (
     raw_phase_rad,
 )
 
-# §I.6 calibration CSV columns. Authoritative order.
+# §I.6 calibration CSV columns. Authoritative order. range_setting
+# is part of the row key (and the (module, range, load, freq)
+# groupby in build_calibration_table) so Range 2 and Range 4 cannot
+# be silently pooled at any pipeline stage.
 CAL_CSV_COLUMNS = [
     "session_id",
     "module_id",
     "load_id",
+    "range_setting",
     "nominal_ohm",
     "actual_ohm",
     "dmm_model",
@@ -70,6 +88,32 @@ CAL_CSV_COLUMNS = [
     "repeat_cv_percent",
     "trusted_flag",
 ]
+
+
+# F.10 default required loads -- the strict-mode actuals
+# completeness check uses these. Anchor (R1k_01) is included.
+DEFAULT_REQUIRED_LOAD_IDS: Tuple[str, ...] = (
+    "R330_01", "R470_01", "R1k_01", "R4k7_01",
+)
+
+# §F.10 specifies 3 repeats per load. Strict mode treats any
+# (module, range, load, frequency) group with fewer than this as
+# a non-pass condition (raises in strict mode; emits NaN cv in
+# permissive mode so trusted_band downstream marks the row
+# untrusted).
+DEFAULT_REQUIRED_REPEATS = 3
+
+
+class CalibrationStrictError(ValueError):
+    """Raised by build_calibration_table when strict=True and the
+    raw CAL slice is missing the evidence required for a bench
+    go/no-go decision (empty CAL, missing actuals for a required
+    load, or fewer than required_repeats sweeps for an F.10 load).
+
+    Subclass of ValueError so existing except-ValueError handlers
+    keep working, but typed so the CLI can surface a structured
+    bench-strictness failure separately from generic schema errors.
+    """
 
 
 @dataclass(frozen=True)
@@ -96,34 +140,163 @@ def build_calibration_table(
     actuals: Dict[str, ResistorAnchor],
     *,
     session_id: Optional[str] = None,
+    strict: bool = False,
+    required_load_ids: Optional[Iterable[str]] = None,
+    required_repeats: int = DEFAULT_REQUIRED_REPEATS,
+    drop_error_sweeps: bool = True,
 ) -> pd.DataFrame:
     """Compute the §I.6 calibration table from §I.5 raw CSV rows.
 
     raw_df must follow the §I.5 long-format schema (the columns
     raw_writer.RAW_CSV_COLUMNS list). Only rows with
-    row_type == 'CAL' contribute. actuals maps load_id ->
-    ResistorAnchor; any load_id present in raw_df['load_id']
-    but missing from actuals is skipped, since GF cannot be
-    computed without R_cal.
+    row_type == 'CAL' contribute. Rows whose ``notes`` carry the
+    listener's ``sweep_end_error=`` tag (set by raw_writer when
+    firmware reported a non-null sweep_end.error) are excluded
+    when drop_error_sweeps is True -- a partial/errored sweep
+    must not silently flow into calibration as valid evidence.
+
+    Grouping key is (module_id, range_setting, load_id,
+    frequency_hz). range_setting in the key prevents Range 2 and
+    Range 4 sweeps from ever being averaged together (the AD5933
+    GF is range-dependent per datasheet Table 17).
+
+    actuals maps load_id -> ResistorAnchor; any load_id present
+    in raw_df['load_id'] but missing from actuals is skipped
+    in permissive mode (no metrology -> no row). In strict mode,
+    every required_load_id (default DEFAULT_REQUIRED_LOAD_IDS)
+    must be present in actuals or CalibrationStrictError is
+    raised before any row is emitted.
 
     session_id, when supplied, overrides the value carried in
     raw_df. Otherwise raw_df's CAL rows must carry exactly one
     session_id; a mixed-session CAL slice is a pipeline-stage
     error, not silently averaged.
 
+    strict=True (the bench/CLI default) raises
+    CalibrationStrictError on:
+      - empty CAL slice in raw_df
+      - any required load missing from actuals
+      - any (module, range, load, freq) group with fewer than
+        required_repeats sweeps (F.10 specifies 3)
+
+    Permissive mode keeps the previous behavior: NaN
+    repeat_cv_percent for under-replicated groups so trusted_band
+    downstream rejects them, and silently skips loads with no
+    metrology.
+
     Returns a DataFrame with the §I.6 columns in declared order.
     trusted_flag is the empty string per the boolean-encoding
     convention; trusted_band.py fills it.
     """
+    required_loads = tuple(
+        required_load_ids
+        if required_load_ids is not None
+        else DEFAULT_REQUIRED_LOAD_IDS
+    )
+
     cal = raw_df[raw_df["row_type"] == "CAL"].copy()
+    if drop_error_sweeps and not cal.empty and "notes" in cal.columns:
+        bad_mask = cal["notes"].astype(str).str.contains(
+            "sweep_end_error=", regex=False, na=False
+        )
+        cal = cal[~bad_mask]
+
     if cal.empty:
+        if strict:
+            raise CalibrationStrictError(
+                "no CAL rows present (after sweep_end_error filter) "
+                "-- bench calibration cannot be evaluated"
+            )
         return pd.DataFrame(columns=CAL_CSV_COLUMNS)
+
+    # Permissive mode: blank module_id/load_id rows fall through to
+    # the groupby and produce per-blank rows downstream, which is the
+    # documented notebook behavior. Strict bench mode rejects them
+    # before any cal row is emitted -- a CAL-shaped record with no
+    # load identity cannot be calibrated, and silently dropping it
+    # would let an unannotated firmware capture pass G-SAT later.
+    if strict:
+        # range_setting may be absent on legacy fixtures (e.g. tests
+        # that hand-build CAL rows without that column). For strict
+        # mode the column must exist explicitly.
+        for col_name in (
+            "module_id", "load_id", "range_setting", "frequency_hz",
+        ):
+            if col_name not in cal.columns:
+                raise CalibrationStrictError(
+                    f"strict: required column {col_name!r} missing from "
+                    "CAL slice -- raw CSV must follow §I.5 schema"
+                )
+            blank_mask = _blank_mask(cal[col_name])
+            n_blank = int(blank_mask.sum())
+            if n_blank:
+                raise CalibrationStrictError(
+                    f"strict: {n_blank} CAL row(s) have blank/null "
+                    f"{col_name!r} -- firmware emission must be "
+                    "annotated (m <id>, h<row_type>, l<load_id>, "
+                    "range setting) before CAL rows are usable"
+                )
+
+        missing_actuals = [
+            ld for ld in required_loads if ld not in actuals
+        ]
+        if missing_actuals:
+            raise CalibrationStrictError(
+                f"actuals map missing required F.10 load(s): "
+                f"{missing_actuals}; populate hardware/resistor_inventory.csv"
+            )
+
+        # Every CAL row's load_id must be in inventory; an unknown
+        # load has no R_actual and so no GF -- silently skipping it
+        # in permissive mode is OK for notebooks, not for the bench.
+        cal_loads = set(cal["load_id"].astype(str).unique())
+        unknown_loads = sorted(cal_loads - set(actuals))
+        if unknown_loads:
+            raise CalibrationStrictError(
+                f"strict: CAL rows reference load_id(s) not in "
+                f"resistor inventory: {unknown_loads}; populate "
+                "hardware/resistor_inventory.csv"
+            )
+
+        # Per (module, range) required-load completeness. A module
+        # that swept only R1k at RANGE_4 cannot pass G-SAT later;
+        # surface the missing evidence here, not as a downstream
+        # NOT_EVALUATED that an operator might miss.
+        by_mod_range = (
+            cal.assign(
+                _mod=cal["module_id"].astype(str),
+                _rng=cal["range_setting"].astype(str),
+                _ld=cal["load_id"].astype(str),
+            )
+            .groupby(["_mod", "_rng"])["_ld"]
+            .apply(lambda s: set(s.unique()))
+        )
+        missing_per = []
+        for (mod, rng), loads in by_mod_range.items():
+            absent = [ld for ld in required_loads if ld not in loads]
+            if absent:
+                missing_per.append({
+                    "module_id": mod, "range_setting": rng,
+                    "missing_loads": absent,
+                })
+        if missing_per:
+            raise CalibrationStrictError(
+                "strict: required F.10 load(s) missing per "
+                f"(module_id, range_setting): {missing_per}"
+            )
 
     # raw.csv stores everything as strings via DictWriter; coerce
     # the numeric columns we touch so arithmetic does not silently
     # operate on object dtype.
     for col in ("real", "imag", "frequency_hz"):
         cal[col] = pd.to_numeric(cal[col], errors="raise")
+
+    # range_setting may be absent on legacy fixtures; default to ""
+    # so the grouping key is well-defined and the column survives
+    # the round-trip into CAL_CSV_COLUMNS.
+    if "range_setting" not in cal.columns:
+        cal["range_setting"] = ""
+    cal["range_setting"] = cal["range_setting"].astype(str).fillna("")
 
     if session_id is None:
         sids = cal["session_id"].unique()
@@ -135,10 +308,11 @@ def build_calibration_table(
         session_id = str(sids[0])
 
     out_rows = []
+    underreplicated: list = []
     grouped = cal.groupby(
-        ["module_id", "load_id", "frequency_hz"], sort=True
+        ["module_id", "range_setting", "load_id", "frequency_hz"], sort=True
     )
-    for (module_id, load_id, freq), grp in grouped:
+    for (module_id, range_setting, load_id, freq), grp in grouped:
         anchor = actuals.get(str(load_id))
         if anchor is None:
             # No metrology -> no row. The §I.5 raw stays intact;
@@ -150,6 +324,15 @@ def build_calibration_table(
         # the operator did not duplicate frequencies within a
         # sweep, and a true average if they did.
         per_sweep = grp.groupby("sweep_id")[["real", "imag"]].mean()
+        n_repeats = int(len(per_sweep))
+        if str(load_id) in required_loads and n_repeats < required_repeats:
+            underreplicated.append({
+                "module_id": str(module_id),
+                "range_setting": str(range_setting),
+                "load_id": str(load_id),
+                "frequency_hz": float(freq),
+                "n_repeats": n_repeats,
+            })
         r_mean = float(per_sweep["real"].mean())
         i_mean = float(per_sweep["imag"].mean())
 
@@ -171,7 +354,10 @@ def build_calibration_table(
 
         # CV across repeats: each repeat's own |Z| (not the pooled
         # one). Matches §H.4 'Within-session CV on resistor
-        # magnitude'. ddof=1 is standard sample CV.
+        # magnitude'. ddof=1 is standard sample CV. NaN when fewer
+        # than two repeats survived -- trusted_band treats NaN CV on
+        # a required band resistor as untrusted (§H.5 / §H.4 cv check
+        # cannot pass without an actual replicate variance).
         per_sweep_mag = np.sqrt(
             per_sweep["real"].to_numpy(dtype=np.float64) ** 2
             + per_sweep["imag"].to_numpy(dtype=np.float64) ** 2
@@ -193,6 +379,7 @@ def build_calibration_table(
             "session_id": session_id,
             "module_id": module_id,
             "load_id": load_id,
+            "range_setting": str(range_setting),
             "nominal_ohm": anchor.nominal_ohm,
             "actual_ohm": anchor.actual_ohm,
             "dmm_model": anchor.dmm_model,
@@ -204,7 +391,43 @@ def build_calibration_table(
             "trusted_flag": "",
         })
 
+    if strict and underreplicated:
+        # Surface up to the first few offenders so the operator can
+        # see which (module, range, load, freq) is short. The full
+        # list is not echoed to keep the error readable.
+        sample = underreplicated[:5]
+        raise CalibrationStrictError(
+            f"{len(underreplicated)} (module,range,load,freq) group(s) "
+            f"have fewer than {required_repeats} CAL repeats "
+            f"(F.10 requires {required_repeats}). First few: {sample}"
+        )
+
+    if strict and not out_rows:
+        # Pathological tail: blank/required/repeats checks all
+        # passed but every group ended up unwritten (m_pooled <= 0
+        # or anchor.actual_ohm <= 0 on every CAL row). The bench
+        # workflow must not accept an empty cal table -- downstream
+        # G-SAT/G-LIN would silently mark NOT_EVALUATED.
+        raise CalibrationStrictError(
+            "strict: final calibration table is empty (every CAL "
+            "group rejected by m_pooled<=0 or actual_ohm<=0); raw "
+            "data is unusable -- inspect raw.jsonl for firmware fault"
+        )
+
     return pd.DataFrame(out_rows, columns=CAL_CSV_COLUMNS)
+
+
+def _blank_mask(series: pd.Series) -> pd.Series:
+    """Boolean mask: True where the cell is null, blank, or 'nan'.
+
+    Captures the four ways a §I.5 raw CSV cell encodes 'no value'
+    after a round-trip through pandas: native NaN/None, the empty
+    string (DictWriter for unannotated firmware emission), the
+    literal 'nan' string (str(float('nan')) when a float pipeline
+    re-stringifies it), and trailing/leading whitespace.
+    """
+    s = series.astype(str).str.strip()
+    return series.isna() | (s == "") | (s.str.lower() == "nan")
 
 
 def write_calibration_csv(
@@ -319,6 +542,9 @@ def run_calibration(
     output_path: Optional[Union[Path, str]] = None,
     *,
     session_id: Optional[str] = None,
+    strict: bool = False,
+    required_load_ids: Optional[Iterable[str]] = None,
+    required_repeats: int = DEFAULT_REQUIRED_REPEATS,
 ) -> pd.DataFrame:
     """Read §I.5 raw + inventory; build §I.6 cal table; optionally write.
 
@@ -327,11 +553,22 @@ def run_calibration(
     of whether output_path is supplied; pass output_path=None to
     use the result in-memory (dashboards, notebooks, paper
     figure scripts).
+
+    strict=True (the bench / CLI default) propagates into
+    build_calibration_table and raises CalibrationStrictError on
+    empty CAL, missing actuals for required loads, or
+    under-replicated F.10 groups. Library callers (synthetic-
+    pipeline / notebook fixtures with intentionally partial
+    loads) keep the permissive default.
     """
     raw_df = pd.read_csv(raw_path, dtype=str, keep_default_na=False)
     actuals = load_inventory(inventory_path)
     cal_df = build_calibration_table(
-        raw_df, actuals, session_id=session_id
+        raw_df, actuals,
+        session_id=session_id,
+        strict=strict,
+        required_load_ids=required_load_ids,
+        required_repeats=required_repeats,
     )
     if output_path is not None:
         write_calibration_csv(cal_df, output_path)

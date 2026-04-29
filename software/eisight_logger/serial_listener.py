@@ -58,8 +58,26 @@ class ListenerStats:
     lines_failed    -- lines that did not validate against JsonlRecord.
     records_written -- validated records dispatched to the CSV writer.
     dropped_data    -- data records the CSV writer could not place
-                       (no open sweep, or sweep_id mismatch). Read
-                       from RawCsvWriter at shutdown.
+                       (no open sweep, sweep_id mismatch, duplicate
+                       idx, or non-monotonic idx). Read from
+                       RawCsvWriter at shutdown.
+
+    Sequence-safety detail counters (mirror RawCsvWriter):
+
+    duplicate_idx        -- data records dropped due to a duplicate
+                            idx within the same sweep.
+    nonmonotonic_idx     -- data records dropped due to non-monotonic
+                            idx within the same sweep.
+    mismatched_sweep_id  -- records dropped because their sweep_id did
+                            not match the open sweep_begin.
+    missing_sweep_end    -- sweeps for which sweep_end never arrived.
+    sweep_end_error      -- sweep_end records with a non-null error
+                            field (rows still on disk, tagged).
+    point_count_mismatch -- sweeps whose flushed row count does not
+                            match sweep_begin.points.
+
+    is_clean() returns True iff none of the above are nonzero --
+    the bench-CLI exit-code predicate.
     """
 
     def __init__(self) -> None:
@@ -67,6 +85,30 @@ class ListenerStats:
         self.lines_failed = 0
         self.records_written = 0
         self.dropped_data = 0
+        self.duplicate_idx = 0
+        self.nonmonotonic_idx = 0
+        self.mismatched_sweep_id = 0
+        self.missing_sweep_end = 0
+        self.sweep_end_error = 0
+        self.point_count_mismatch = 0
+
+    def is_clean(self) -> bool:
+        """True iff no validation failures and no sequence anomalies.
+
+        Bench CLI exit-code predicate: a non-clean ListenerStats means
+        partial/error sweeps may be on disk and the calibration stage
+        cannot trust them; the CLI must surface a non-zero exit.
+        """
+        return (
+            self.lines_failed == 0
+            and self.dropped_data == 0
+            and self.duplicate_idx == 0
+            and self.nonmonotonic_idx == 0
+            and self.mismatched_sweep_id == 0
+            and self.missing_sweep_end == 0
+            and self.sweep_end_error == 0
+            and self.point_count_mismatch == 0
+        )
 
 
 def listen_serial(
@@ -194,6 +236,12 @@ def _run(
         raw_fh.close()
 
     stats.dropped_data = csv_writer.dropped_data_count
+    stats.duplicate_idx = csv_writer.duplicate_idx_count
+    stats.nonmonotonic_idx = csv_writer.nonmonotonic_idx_count
+    stats.mismatched_sweep_id = csv_writer.mismatched_sweep_id_count
+    stats.missing_sweep_end = csv_writer.missing_sweep_end_count
+    stats.sweep_end_error = csv_writer.sweep_end_error_count
+    stats.point_count_mismatch = csv_writer.point_count_mismatch_count
     _print_summary(stats, raw_path, csv_path)
     return stats
 
@@ -218,6 +266,18 @@ def _print_summary(
         f"records={stats.records_written} "
         f"dropped_data={stats.dropped_data}"
     )
+    if not stats.is_clean():
+        # Print the typed counters so the operator can see *why*
+        # the listener will exit non-zero, not just that it did.
+        print(
+            f"sequence anomalies: dup_idx={stats.duplicate_idx} "
+            f"nonmono_idx={stats.nonmonotonic_idx} "
+            f"mismatch_sweep_id={stats.mismatched_sweep_id} "
+            f"missing_sweep_end={stats.missing_sweep_end} "
+            f"sweep_end_error={stats.sweep_end_error} "
+            f"point_count_mismatch={stats.point_count_mismatch}",
+            file=sys.stderr,
+        )
     print(f"raw.jsonl: {raw_path}")
     print(f"raw.csv:   {csv_path}")
 
@@ -291,7 +351,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             sample_id=args.sample_id,
             notes=args.notes,
         )
-    return 1 if stats.lines_failed > 0 else 0
+    return 0 if stats.is_clean() else 1
 
 
 if __name__ == "__main__":

@@ -45,6 +45,12 @@ G_DC3_FAIL_THRESHOLD_MV = 100.0
 # permitted; the per-item table lists every range either way.
 G_DC3_GATING_RANGE = "RANGE_4"
 
+# §E.11 primary criterion: BOTH conditions must be present at the
+# gating range for a module to be evaluated. Either one alone is
+# insufficient evidence -- a missing condition row is unsafe-as-PASS,
+# so the module verdict is NOT_EVALUATED instead.
+G_DC3_REQUIRED_CONDITIONS: List[str] = ["NOLOAD", "R470"]
+
 # §F.6 column list for hardware/dc_bias_check.csv.
 DC_BIAS_CSV_COLUMNS: List[str] = [
     "module_id", "range", "condition",
@@ -59,6 +65,7 @@ def evaluate_g_dc3(
     pass_threshold_mv: float = G_DC3_PASS_THRESHOLD_MV,
     fail_threshold_mv: float = G_DC3_FAIL_THRESHOLD_MV,
     gating_range: str = G_DC3_GATING_RANGE,
+    required_conditions: Optional[List[str]] = None,
 ) -> GateReport:
     """Evaluate §E.11 DC-bias gate from a dc_bias_check.csv frame.
 
@@ -72,16 +79,35 @@ def evaluate_g_dc3(
         pass_threshold <= |x| < fail_threshold -> WARN
         |x| >= fail_threshold_mv          -> FAIL
 
-    Empty input or no rows at the gating range -> overall PASS
-    (nothing evaluated; matches aggregate_verdict's empty-iter
-    semantics).
+    Module verdict (the rolled-up overall) requires evidence on
+    BOTH §E.11 primary criterion conditions at the gating range:
+    NOLOAD AND R470. A module that is missing either condition
+    row at the gating range produces NOT_EVALUATED for that
+    module, and the overall verdict is NOT_EVALUATED if any
+    evaluable module is short on evidence (or if no module has
+    any gating-range row at all). Empty input -> NOT_EVALUATED.
+
+    The per-item table still carries every row regardless of
+    range or condition for traceability.
     """
+    required = list(
+        required_conditions
+        if required_conditions is not None
+        else G_DC3_REQUIRED_CONDITIONS
+    )
+
     if df.empty:
         return GateReport(
             gate_id="G-DC3",
-            verdict=GateVerdict.PASS,
-            summary="G-DC3: no DC-bias rows supplied -- gate not evaluated",
-            details={"row_count": 0, "gating_range": gating_range},
+            verdict=GateVerdict.NOT_EVALUATED,
+            summary=(
+                "G-DC3: no DC-bias rows supplied -- "
+                "gate NOT_EVALUATED (unsafe-as-PASS)"
+            ),
+            details={
+                "row_count": 0, "gating_range": gating_range,
+                "required_conditions": required,
+            },
             per_item=pd.DataFrame(),
         )
 
@@ -101,17 +127,61 @@ def evaluate_g_dc3(
     work["abs_diff_mv"] = abs_diff
     work["verdict"] = abs_diff.map(_verdict_for)
 
+    # Module universe = every module_id that appears ANYWHERE in the
+    # input file, not just rows at the gating range. A module that
+    # was logged only at RANGE_2 has zero gating-range evidence and
+    # must surface as NOT_EVALUATED -- silently dropping it would
+    # let an incomplete dc_bias_check.csv pass G-DC3 by omission.
+    all_modules = sorted(work["module_id"].astype(str).unique().tolist())
     gating_rows = work[work["range"] == gating_range]
-    overall = (
-        aggregate_verdict(gating_rows["verdict"])
-        if not gating_rows.empty
-        else GateVerdict.PASS
-    )
 
-    if gating_rows.empty:
+    # Per-module evidence + verdict roll-up. A module that is missing
+    # any required condition at the gating range cannot pass; the
+    # module-level verdict is NOT_EVALUATED, distinct from FAIL.
+    module_verdicts: List[GateVerdict] = []
+    modules_not_evaluated: List[str] = []
+    modules_evaluated: List[str] = []
+    for module_id in all_modules:
+        mod_gating = gating_rows[
+            gating_rows["module_id"].astype(str) == module_id
+        ]
+        present = set(mod_gating["condition"].astype(str).unique().tolist())
+        missing = [c for c in required if c not in present]
+        if missing or mod_gating.empty:
+            modules_not_evaluated.append(module_id)
+            continue
+        modules_evaluated.append(module_id)
+        module_verdicts.append(aggregate_verdict(mod_gating["verdict"]))
+
+    # Severity policy: overall is PASS only when every module is PASS.
+    # Otherwise FAIL beats WARN beats NOT_EVALUATED (NOT_EVALUATED is
+    # a missing-evidence state, less severe than data that explicitly
+    # failed but still non-pass).
+    if not modules_evaluated and not modules_not_evaluated:
+        overall = GateVerdict.NOT_EVALUATED
+    else:
+        rolled = (
+            aggregate_verdict(module_verdicts)
+            if module_verdicts
+            else GateVerdict.NOT_EVALUATED
+        )
+        if rolled == GateVerdict.PASS and modules_not_evaluated:
+            overall = GateVerdict.NOT_EVALUATED
+        elif not module_verdicts:
+            overall = GateVerdict.NOT_EVALUATED
+        else:
+            overall = rolled
+
+    if not all_modules:
         summary = (
-            f"G-DC3: no rows at gating range {gating_range!r} -- "
-            f"{len(work)} non-gating row(s) logged for reference"
+            "G-DC3: NOT_EVALUATED -- no module rows in input "
+            "(empty dc_bias_check.csv)"
+        )
+    elif overall == GateVerdict.NOT_EVALUATED:
+        summary = (
+            f"G-DC3: NOT_EVALUATED -- modules lacking required "
+            f"condition row(s) {required} at {gating_range}: "
+            f"{sorted(modules_not_evaluated)}"
         )
     else:
         summary = (
@@ -125,13 +195,16 @@ def evaluate_g_dc3(
         "gating_range": gating_range,
         "pass_threshold_mv": pass_threshold_mv,
         "fail_threshold_mv": fail_threshold_mv,
+        "required_conditions": required,
+        "all_modules_in_input": all_modules,
+        "modules_evaluated_at_gating_range": sorted(modules_evaluated),
+        "modules_not_evaluated_at_gating_range": sorted(
+            modules_not_evaluated
+        ),
     }
     if not gating_rows.empty:
         details["max_abs_diff_mv_at_gating_range"] = float(
             gating_rows["abs_diff_mv"].max()
-        )
-        details["modules_evaluated_at_gating_range"] = sorted(
-            gating_rows["module_id"].astype(str).unique().tolist()
         )
 
     per_item = work[[

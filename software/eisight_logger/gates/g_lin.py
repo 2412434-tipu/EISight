@@ -41,7 +41,7 @@ Implements: §F.10.b (G-LIN). Consumes: §I.6 calibration CSV
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable, List, Optional, Union
+from typing import Dict, Iterable, List, Mapping, Optional, Set, Tuple, Union
 
 import pandas as pd
 
@@ -64,7 +64,9 @@ def evaluate_g_lin(
     pass_threshold_pct: float = G_LIN_PASS_THRESHOLD_PCT,
     test_load_id: str = G_LIN_TEST_LOAD_ID,
     anchor_load_id: str = G_LIN_ANCHOR_LOAD_ID,
-    trusted_band_freqs: Optional[Iterable[float]] = None,
+    trusted_band_freqs: Optional[
+        Union[Iterable[float], Mapping[str, Iterable[float]]]
+    ] = None,
 ) -> GateReport:
     """Evaluate §F.10.b G-LIN from two §I.6 calibration tables.
 
@@ -73,25 +75,45 @@ def evaluate_g_lin(
     test load and the anchor load. Returns a GateReport with
     one per-item row per (module, frequency_hz) evaluation.
 
-    trusted_band_freqs, when supplied, restricts evaluation to
-    those frequencies (recommended; pass the frequency_hz
-    column of the trusted_band.evaluate_trusted_band result
-    filtered to trusted == True). When None, all frequencies
-    common to both tables are evaluated -- conservative and
-    surfaces out-of-band non-linearity in the report, but a
-    single bad edge frequency would otherwise FAIL the module.
+    trusted_band_freqs accepts either:
+      - a Mapping[module_id, Iterable[float]] (the bench-safe
+        form -- per-module trusted set; a frequency trusted on
+        Module A does NOT authorize that frequency for Module B);
+      - or a flat Iterable[float] (back-compat for single-module
+        library tests; applied globally across modules).
+
+    The CLI runner (run_g_lin) always passes the per-module
+    Mapping form via _trusted_freqs_from_csv. When None, all
+    frequencies common to both tables are evaluated --
+    conservative and surfaces out-of-band non-linearity in the
+    report, but a single bad edge frequency would FAIL.
+
+    Required-evidence contract: the module universe is the UNION
+    of module_id values in cal_r4_df and cal_r2_df. Each module
+    must be present in both ranges, must carry both test_load and
+    anchor_load in both ranges, and must have at least one
+    overlapping frequency (post trusted-band restriction). Any
+    module that fails any precondition is NOT_EVALUATED at the
+    module level. Overall verdict is PASS only when every module
+    in the universe was evaluated and PASSed; any
+    NOT_EVALUATED / WARN / FAIL module flips the overall to a
+    non-pass state. The Range-2 cal MUST come from the SAME
+    module_id as the Range-4 cal -- pooling different module_ids
+    measures inter-module variance, not amplitude linearity.
     """
     if cal_r4_df.empty or cal_r2_df.empty:
         return GateReport(
             gate_id="G-LIN",
-            verdict=GateVerdict.PASS,
+            verdict=GateVerdict.NOT_EVALUATED,
             summary=(
                 "G-LIN: empty calibration table on at least one range "
-                "-- gate not evaluated"
+                "-- gate NOT_EVALUATED (unsafe-as-PASS)"
             ),
             details={
                 "r4_row_count": int(len(cal_r4_df)),
                 "r2_row_count": int(len(cal_r2_df)),
+                "test_load_id": test_load_id,
+                "anchor_load_id": anchor_load_id,
             },
             per_item=pd.DataFrame(),
         )
@@ -99,34 +121,100 @@ def evaluate_g_lin(
     r4 = _coerce(cal_r4_df)
     r2 = _coerce(cal_r2_df)
 
-    eval_freqs = (
-        {float(f) for f in trusted_band_freqs}
-        if trusted_band_freqs is not None
-        else None
-    )
+    per_module_freqs, eval_freqs = _normalize_trusted_freqs(trusted_band_freqs)
+    if (
+        per_module_freqs is not None
+        and not per_module_freqs
+        and eval_freqs is None
+    ) or (eval_freqs is not None and not eval_freqs):
+        return GateReport(
+            gate_id="G-LIN",
+            verdict=GateVerdict.NOT_EVALUATED,
+            summary=(
+                "G-LIN: trusted_band_freqs is empty -- "
+                "no overlap to evaluate -- NOT_EVALUATED"
+            ),
+            details={
+                "test_load_id": test_load_id,
+                "anchor_load_id": anchor_load_id,
+                "trusted_band_restricted": True,
+            },
+            per_item=pd.DataFrame(),
+        )
+
+    r4_modules = set(r4["module_id"].astype(str).unique())
+    r2_modules = set(r2["module_id"].astype(str).unique())
+    module_universe = sorted(r4_modules | r2_modules)
+    shared_modules = sorted(r4_modules & r2_modules)
 
     per_item_rows: List[dict] = []
-    modules = sorted(
-        set(r4["module_id"].unique()) & set(r2["module_id"].unique())
-    )
-    for module_id in modules:
-        r_test = _r_test_actual(
-            r4[r4["module_id"] == module_id], test_load_id
-        )
+    modules_not_evaluated: List[Tuple[str, str]] = []
+    modules_evaluated: List[str] = []
+
+    for module_id in module_universe:
+        if module_id not in r4_modules:
+            modules_not_evaluated.append((
+                module_id, "absent from Range-4 cal"
+            ))
+            continue
+        if module_id not in r2_modules:
+            modules_not_evaluated.append((
+                module_id, "absent from Range-2 cal"
+            ))
+            continue
+
+        r4_mod = r4[r4["module_id"].astype(str) == module_id]
+        r2_mod = r2[r2["module_id"].astype(str) == module_id]
+        r4_loads = set(r4_mod["load_id"].astype(str).unique())
+        r2_loads = set(r2_mod["load_id"].astype(str).unique())
+        missing_in_r4 = [
+            ld for ld in (test_load_id, anchor_load_id) if ld not in r4_loads
+        ]
+        missing_in_r2 = [
+            ld for ld in (test_load_id, anchor_load_id) if ld not in r2_loads
+        ]
+        if missing_in_r4 or missing_in_r2:
+            modules_not_evaluated.append((
+                module_id,
+                f"missing R4={missing_in_r4} R2={missing_in_r2}",
+            ))
+            continue
+
+        r_test = _r_test_actual(r4_mod, test_load_id)
         if r_test is None or r_test == 0.0:
+            modules_not_evaluated.append((
+                module_id, "missing/zero actual_ohm for test load"
+            ))
             continue
         z_r4 = _calibrated_z_per_freq(
-            r4[r4["module_id"] == module_id],
-            test_load_id, anchor_load_id, r_test,
+            r4_mod, test_load_id, anchor_load_id, r_test,
         )
         z_r2 = _calibrated_z_per_freq(
-            r2[r2["module_id"] == module_id],
-            test_load_id, anchor_load_id, r_test,
+            r2_mod, test_load_id, anchor_load_id, r_test,
         )
         common_freqs = sorted(set(z_r4) & set(z_r2))
+        # Per-module trusted-band restriction: a frequency trusted
+        # on Module A is NOT authorized for Module B. Pure-iterable
+        # back-compat applies the same set globally.
+        module_eval_freqs = _resolve_module_freqs(
+            module_id, per_module_freqs, eval_freqs,
+        )
+        if module_eval_freqs is not None:
+            common_freqs = [f for f in common_freqs if f in module_eval_freqs]
+        if not common_freqs:
+            modules_not_evaluated.append((
+                module_id,
+                "no overlapping frequencies"
+                + (
+                    " (after per-module trusted-band restriction)"
+                    if module_eval_freqs is not None
+                    else ""
+                ),
+            ))
+            continue
+
+        modules_evaluated.append(module_id)
         for f in common_freqs:
-            if eval_freqs is not None and f not in eval_freqs:
-                continue
             diff_pct = abs(z_r2[f] - z_r4[f]) / r_test * 100.0
             verdict = (
                 GateVerdict.PASS.value
@@ -146,19 +234,32 @@ def evaluate_g_lin(
     if per_item.empty:
         return GateReport(
             gate_id="G-LIN",
-            verdict=GateVerdict.PASS,
+            verdict=GateVerdict.NOT_EVALUATED,
             summary=(
-                "G-LIN: no overlapping frequencies between Range-4 "
-                "and Range-2 cal tables -- gate not evaluated"
+                "G-LIN: NOT_EVALUATED -- no module had both required "
+                f"loads ({test_load_id}, {anchor_load_id}) and an "
+                "overlapping frequency on both ranges"
             ),
             details={
                 "test_load_id": test_load_id,
                 "anchor_load_id": anchor_load_id,
+                "module_universe": module_universe,
+                "shared_modules": shared_modules,
+                "modules_not_evaluated": [
+                    {"module_id": m, "reason": r}
+                    for m, r in modules_not_evaluated
+                ],
             },
             per_item=per_item,
         )
 
-    overall = aggregate_verdict(per_item["verdict"])
+    rolled = aggregate_verdict(per_item["verdict"])
+    # Severity: PASS only if every module in the universe is PASS.
+    # FAIL > WARN > NOT_EVALUATED > PASS for the rolled-up overall.
+    if modules_not_evaluated and rolled == GateVerdict.PASS:
+        overall = GateVerdict.NOT_EVALUATED
+    else:
+        overall = rolled
     summary = (
         f"G-LIN: {overall.value} on test load {test_load_id} "
         f"(anchor {anchor_load_id}; max |diff| = "
@@ -166,13 +267,27 @@ def evaluate_g_lin(
         f"{len(per_item)} frequency point(s); threshold "
         f"{pass_threshold_pct:g}%)"
     )
+    if modules_not_evaluated:
+        summary += (
+            f" -- modules NOT_EVALUATED: "
+            f"{[m for m, _ in modules_not_evaluated]}"
+        )
     details = {
         "test_load_id": test_load_id,
         "anchor_load_id": anchor_load_id,
         "pass_threshold_pct": pass_threshold_pct,
         "max_diff_pct": float(per_item["diff_pct"].max()),
         "evaluated_freq_count": int(len(per_item)),
-        "trusted_band_restricted": eval_freqs is not None,
+        "trusted_band_restricted": (
+            per_module_freqs is not None or eval_freqs is not None
+        ),
+        "trusted_band_per_module": per_module_freqs is not None,
+        "module_universe": module_universe,
+        "modules_evaluated": sorted(modules_evaluated),
+        "modules_not_evaluated": [
+            {"module_id": m, "reason": r}
+            for m, r in modules_not_evaluated
+        ],
     }
 
     return GateReport(
@@ -232,24 +347,86 @@ def _r_test_actual(
     return float(rows["actual_ohm"].iloc[0])
 
 
-def _trusted_freqs_from_csv(path: Union[Path, str]) -> List[float]:
-    """Extract trusted-band frequencies from a merged §I.5/§I.6 CSV.
+def _normalize_trusted_freqs(
+    trusted_band_freqs,
+) -> Tuple[Optional[Dict[str, Set[float]]], Optional[Set[float]]]:
+    """Normalize the trusted_band_freqs argument into (per_module, global).
+
+    Exactly one of the two outputs is non-None when the caller
+    supplied a value: a Mapping yields per_module (the bench-safe
+    form), an Iterable yields global (back-compat). None passes
+    through unchanged.
+    """
+    if trusted_band_freqs is None:
+        return None, None
+    if isinstance(trusted_band_freqs, Mapping):
+        per_module: Dict[str, Set[float]] = {
+            str(k): {float(f) for f in v}
+            for k, v in trusted_band_freqs.items()
+        }
+        return per_module, None
+    flat = {float(f) for f in trusted_band_freqs}
+    return None, flat
+
+
+def _resolve_module_freqs(
+    module_id: str,
+    per_module_freqs: Optional[Dict[str, Set[float]]],
+    eval_freqs: Optional[Set[float]],
+) -> Optional[Set[float]]:
+    """Per-module trusted frequency set (or global fall-through).
+
+    The per-module mapping is the canonical bench form: a module
+    with no entry in the mapping (or with an empty set) is treated
+    as having NO trusted frequencies, NOT as 'unrestricted' --
+    silently falling through to the union would let Module A's
+    trusted band authorize Module B by accident, which is
+    exactly the bug the audit flagged.
+    """
+    if per_module_freqs is not None:
+        return per_module_freqs.get(module_id, set())
+    return eval_freqs
+
+
+def _trusted_freqs_from_csv(
+    path: Union[Path, str],
+) -> Dict[str, Set[float]]:
+    """Per-module trusted-band frequencies from a merged §I.5/§I.6 CSV.
 
     Either of run_trusted_band's outputs (merged_raw, merged_cal)
     works as input -- both carry module_id, frequency_hz, and the
     "True"/"False"/"" trusted_flag encoding locked in
-    raw_writer.py. Returns the unique frequency_hz values whose
-    trusted_flag is "True"; the §H.5 trusted band is module-level
-    so a frequency trusted on any module is included.
+    raw_writer.py. Returns ``{module_id: {frequency_hz, ...}}``
+    over rows whose trusted_flag == "True".
+
+    The §H.5 trusted band is module-level. A flat global frequency
+    set would let a frequency trusted on Module A authorize that
+    same frequency on Module B, which is unsafe -- per-module
+    isolation is enforced by returning the dict.
+
+    Raises ValueError if the trusted-band CSV lacks the
+    ``module_id`` column entirely; that file cannot be safely
+    consumed by G-LIN under per-module isolation. The legacy
+    global-set form is intentionally not preserved as a fallback.
     """
     df = pd.read_csv(path, dtype=str, keep_default_na=False)
+    if "module_id" not in df.columns:
+        raise ValueError(
+            f"trusted-band CSV {path} lacks 'module_id' column; "
+            "G-LIN requires per-module trusted-frequency isolation, "
+            "so a global-set fallback is unsafe and not provided"
+        )
     trusted_rows = df[df["trusted_flag"] == "True"]
     if trusted_rows.empty:
-        return []
-    freqs = pd.to_numeric(
-        trusted_rows["frequency_hz"], errors="raise"
-    ).astype(float)
-    return sorted(set(freqs.tolist()))
+        return {}
+    out: Dict[str, Set[float]] = {}
+    freqs = pd.to_numeric(trusted_rows["frequency_hz"], errors="raise").astype(float)
+    for module_id, freq in zip(
+        trusted_rows["module_id"].astype(str).tolist(),
+        freqs.tolist(),
+    ):
+        out.setdefault(module_id, set()).add(float(freq))
+    return out
 
 
 def run_g_lin(

@@ -121,8 +121,17 @@ eisight-logger gate --type g_dc3 --csv /tmp/walk/dc_bias_check.csv \
 `gate --type g_lin` requires two cal tables (Range 4 and Range 2
 per §F.10.b's "one additional Range 2 sweep" rule); a single
 synthetic file does not exercise it. Generate two JSONL files
-with different `--module-id` / `--sweep-id` and `range_setting`
-overrides, calibrate each, then:
+with **the SAME `--module-id`** but distinct `--sweep-id` and
+the appropriate `range_setting` overrides (RANGE_4 vs RANGE_2),
+calibrate each, then:
+
+> **Safety note — do NOT use different `--module-id` for the two
+> ranges.** G-LIN compares |Z| from the same physical module at
+> two excitation amplitudes; a different module_id measures
+> inter-module variance instead, so the gate now refuses
+> (`NOT_EVALUATED`) when the Range-4 and Range-2 cal tables share
+> no module_id. Earlier walkthrough text suggested distinct
+> `--module-id` values; that was unsafe and is corrected here.
 
 ```
 eisight-logger gate --type g_lin \

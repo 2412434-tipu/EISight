@@ -53,7 +53,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 from eisight_logger.schemas import (
     DataRecord,
@@ -99,10 +99,19 @@ RAW_CSV_COLUMNS: List[str] = [
 
 @dataclass
 class _SweepBuffer:
-    """Per-sweep metadata + buffered data rows, flushed on sweep_end."""
+    """Per-sweep metadata + buffered data rows, flushed on sweep_end.
+
+    seen_indices and last_idx back the duplicate / non-monotonic
+    idx checks in RawCsvWriter.on_record. seen_indices is the
+    fast membership test; last_idx is the running monotonicity
+    cursor. Both are reset implicitly when the buffer is replaced
+    on a new sweep_begin.
+    """
 
     meta: SweepBeginRecord
     rows: List[Dict[str, str]] = field(default_factory=list)
+    seen_indices: Set[int] = field(default_factory=set)
+    last_idx: Optional[int] = None
 
 
 class RawCsvWriter:
@@ -120,6 +129,41 @@ class RawCsvWriter:
     open also discards the previous buffer (bumping the
     same counter), since unannotated rows would be unjoinable
     downstream.
+
+    Sequence safety counters (surfaced via ListenerStats and
+    bench-CLI exit-code logic):
+
+      dropped_data_count        -- data records that could not be
+                                   placed (no open sweep, sweep_id
+                                   mismatch, duplicate idx, or
+                                   non-monotonic idx). Each kind
+                                   also bumps a typed counter below.
+      duplicate_idx_count       -- data records sharing an idx
+                                   already buffered for the same
+                                   sweep_id. Dropped, not written.
+      nonmonotonic_idx_count    -- data records whose idx <= the
+                                   most recent idx in the buffer.
+                                   Dropped, not written.
+      mismatched_sweep_id_count -- data records with a sweep_id not
+                                   matching the open sweep_begin.
+      missing_sweep_end_count   -- sweeps whose buffered rows were
+                                   discarded because sweep_end
+                                   never arrived (a new sweep_begin
+                                   arrived first, or close() ran
+                                   while the buffer was open).
+      sweep_end_error_count     -- sweep_end records with non-null
+                                   error (rows still flushed with
+                                   sweep_end_error= tag in notes,
+                                   per the §I.5 self-contained-CSV
+                                   invariant). Bench gates treat
+                                   these as non-pass evidence.
+      point_count_mismatch_count -- sweeps whose flushed row count
+                                   does not equal sweep_begin.points.
+                                   Counts the *sweep*, not rows.
+
+    A bench listener invocation is "clean" iff lines_failed and all
+    of the counters above are zero -- the CLI checks
+    ListenerStats.is_clean() to decide its exit code.
     """
 
     def __init__(
@@ -139,6 +183,13 @@ class RawCsvWriter:
         self.session_id_override = session_id
         self._buffer: Optional[_SweepBuffer] = None
         self.dropped_data_count = 0
+        # Typed sequence-safety counters (see class docstring).
+        self.duplicate_idx_count = 0
+        self.nonmonotonic_idx_count = 0
+        self.mismatched_sweep_id_count = 0
+        self.missing_sweep_end_count = 0
+        self.sweep_end_error_count = 0
+        self.point_count_mismatch_count = 0
 
         # newline="" is the Python 3 CSV idiom; without it, embedded
         # newlines in quoted fields would not round-trip correctly.
@@ -152,15 +203,39 @@ class RawCsvWriter:
     def on_record(self, record: JsonlRecord) -> None:
         if isinstance(record, SweepBeginRecord):
             if self._buffer is not None:
+                # An open buffer at sweep_begin means the previous
+                # sweep_end never arrived. Drop the buffered rows --
+                # they would be unannotated (no post-temps) and so
+                # unjoinable downstream.
                 self.dropped_data_count += len(self._buffer.rows)
+                self.missing_sweep_end_count += 1
             self._buffer = _SweepBuffer(meta=record)
         elif isinstance(record, DataRecord):
+            if self._buffer is None:
+                self.dropped_data_count += 1
+                self.mismatched_sweep_id_count += 1
+                return
+            if record.sweep_id != self._buffer.meta.sweep_id:
+                self.dropped_data_count += 1
+                self.mismatched_sweep_id_count += 1
+                return
+            # Duplicate / non-monotonic idx within the same sweep
+            # is a firmware re-send or scrambled-stream symptom; an
+            # accepted duplicate would inflate the per-sweep mean
+            # and silently corrupt calibration.
+            if record.idx in self._buffer.seen_indices:
+                self.dropped_data_count += 1
+                self.duplicate_idx_count += 1
+                return
             if (
-                self._buffer is None
-                or record.sweep_id != self._buffer.meta.sweep_id
+                self._buffer.last_idx is not None
+                and record.idx <= self._buffer.last_idx
             ):
                 self.dropped_data_count += 1
+                self.nonmonotonic_idx_count += 1
                 return
+            self._buffer.seen_indices.add(record.idx)
+            self._buffer.last_idx = record.idx
             self._buffer.rows.append(self._row_for_data(record))
         elif isinstance(record, SweepEndRecord):
             if (
@@ -168,7 +243,13 @@ class RawCsvWriter:
                 or record.sweep_id != self._buffer.meta.sweep_id
             ):
                 # Stray sweep_end with no matching open sweep.
+                self.mismatched_sweep_id_count += 1
                 return
+            if record.error is not None:
+                self.sweep_end_error_count += 1
+            expected = self._buffer.meta.points
+            if expected and len(self._buffer.rows) != int(expected):
+                self.point_count_mismatch_count += 1
             self._flush(record)
             self._buffer = None
         # Other record types (hello, module_id_set, error, etc.)
@@ -180,6 +261,7 @@ class RawCsvWriter:
         # dropped from the CSV. raw.jsonl is still complete.
         if self._buffer is not None:
             self.dropped_data_count += len(self._buffer.rows)
+            self.missing_sweep_end_count += 1
             self._buffer = None
         self._fh.flush()
         self._fh.close()
