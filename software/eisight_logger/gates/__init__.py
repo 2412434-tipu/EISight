@@ -26,6 +26,7 @@ runners, not a public surface guarantee.
 from eisight_logger.gates.common import (
     GateReport,
     GateVerdict,
+    verdict_is_pass,
     write_json,
     write_text,
 )
@@ -42,6 +43,7 @@ __all__ = [
     "run_g_dc3",
     "run_g_lin",
     "run_g_sat",
+    "verdict_is_pass",
     "write_json",
     "write_text",
 ]

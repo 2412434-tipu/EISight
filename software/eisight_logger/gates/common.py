@@ -14,7 +14,15 @@ disk in the two formats cli.py exposes.
 
 aggregate_verdict is the canonical worst-case roll-up: any FAIL
 beats any WARN beats PASS. Empty input returns PASS by
-convention -- nothing was evaluated, so nothing failed.
+convention at the *library* level (pure aggregator math has
+nothing to fail on). Bench gate runners MUST override this with
+a NOT_EVALUATED verdict when no rows were actually evaluated --
+empty/incomplete input is unsafe-as-PASS for go/no-go.
+
+Verdict ordering for severity (used by CLI exit-code logic):
+PASS < WARN < FAIL, and NOT_EVALUATED is a separate
+non-pass state outside the linear worst-case axis.
+verdict_is_pass is the canonical "is it OK to ship?" check.
 
 Implements: shared report contract for gates/g_dc3.py,
 gates/g_sat.py, gates/g_lin.py.
@@ -32,27 +40,44 @@ import pandas as pd
 
 
 class GateVerdict(str, Enum):
-    """Tri-state gate outcome.
+    """Quad-state gate outcome.
 
     Values are uppercase strings so the JSON / text artifacts
     self-document. Inheriting from str makes the members
     trivially JSON-serializable -- json.dumps(verdict) produces
-    "PASS" / "WARN" / "FAIL" without a custom encoder.
+    the literal value string without a custom encoder.
+
+    NOT_EVALUATED means the gate could not run because required
+    evidence was absent (empty input, missing required loads or
+    conditions, no overlap, etc.). It is *not* the same as FAIL
+    -- FAIL is "data was evaluated and failed the criterion";
+    NOT_EVALUATED is "the criterion never got applied". Bench CLI
+    treats both as nonzero exit; report artifacts preserve the
+    distinction so an operator can tell missing data from bad
+    data.
     """
 
     PASS = "PASS"
     WARN = "WARN"
     FAIL = "FAIL"
+    NOT_EVALUATED = "NOT_EVALUATED"
 
 
 def aggregate_verdict(verdicts: Iterable[Any]) -> GateVerdict:
     """Worst-case aggregator: any FAIL -> FAIL; any WARN -> WARN; else PASS.
 
-    Used by every gate to roll a per-item verdict column up to
-    the report-level overall. verdicts may be a Series of
-    strings, an iterable of GateVerdict members, or a mix; each
-    value is coerced through GateVerdict(...) which raises on
-    an unknown string. Empty input returns PASS.
+    Library-level aggregator over per-item PASS/WARN/FAIL strings.
+    Used by every gate to roll a per-item verdict column up to a
+    severity number. verdicts may be a Series of strings, an
+    iterable of GateVerdict members, or a mix; each value is
+    coerced through GateVerdict(...) which raises on an unknown
+    string.
+
+    Empty input returns PASS for pure-library callers (nothing to
+    fail on). Bench gate runners MUST NOT propagate that empty=PASS
+    into a real go/no-go verdict -- they detect missing required
+    evidence themselves and return GateVerdict.NOT_EVALUATED before
+    calling this.
     """
     seen = set()
     for v in verdicts:
@@ -62,6 +87,20 @@ def aggregate_verdict(verdicts: Iterable[Any]) -> GateVerdict:
     if GateVerdict.WARN in seen:
         return GateVerdict.WARN
     return GateVerdict.PASS
+
+
+def verdict_is_pass(verdict: Union[GateVerdict, str]) -> bool:
+    """Single-source-of-truth predicate for 'safe to ship'.
+
+    Only GateVerdict.PASS returns True. WARN, FAIL, and
+    NOT_EVALUATED all return False. cli.py and any other bench
+    consumer must route exit-code / blocking decisions through
+    this so a future verdict state cannot silently be classified
+    as pass.
+    """
+    if isinstance(verdict, GateVerdict):
+        return verdict == GateVerdict.PASS
+    return verdict == GateVerdict.PASS.value
 
 
 @dataclass

@@ -94,13 +94,27 @@ def _dc_bias_csv(tmp_path: Path, rows: list[dict]) -> Path:
     (150.0, GateVerdict.FAIL),
 ])
 def test_g_dc3_pass_warn_fail_thresholds(vdc_mv, expected):
-    df = pd.DataFrame([{
-        "module_id": "AD5933-A-DIRECT", "range": "RANGE_4",
-        "condition": "NOLOAD",
-        "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": vdc_mv,
-        "V_DC_DIFF_mV": vdc_mv, "V_DD_V": 5.0,
-        "date": "2026-04-29", "operator": "T",
-    }], columns=DC_BIAS_CSV_COLUMNS)
+    # G-DC3 requires BOTH NOLOAD and R470 condition rows at the
+    # gating range to evaluate (§E.11 primary criterion). Pair the
+    # parametrized NOLOAD with a clean R470 (V_DC=0) so the only
+    # variable across the parametrized sweep is the threshold band
+    # of the NOLOAD row.
+    df = pd.DataFrame([
+        {
+            "module_id": "AD5933-A-DIRECT", "range": "RANGE_4",
+            "condition": "NOLOAD",
+            "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": vdc_mv,
+            "V_DC_DIFF_mV": vdc_mv, "V_DD_V": 5.0,
+            "date": "2026-04-29", "operator": "T",
+        },
+        {
+            "module_id": "AD5933-A-DIRECT", "range": "RANGE_4",
+            "condition": "R470",
+            "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 0.0,
+            "V_DC_DIFF_mV": 0.0, "V_DD_V": 5.0,
+            "date": "2026-04-29", "operator": "T",
+        },
+    ], columns=DC_BIAS_CSV_COLUMNS)
     report = evaluate_g_dc3(df)
     assert report.verdict == expected
 
@@ -129,11 +143,19 @@ def test_g_dc3_module_fail_if_any_gating_row_fails():
 def test_g_dc3_non_gating_range_does_not_promote_module_verdict():
     # §E.11 step 8: only Range 4 gates; Range 2 / 1 rows are
     # informational. A fail at Range 2 with PASS at Range 4 -> PASS.
+    # Both required conditions (NOLOAD + R470) must be present at
+    # the gating range for the module to be evaluable at all.
     df = pd.DataFrame([
         {
             "module_id": "M1", "range": "RANGE_4", "condition": "NOLOAD",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 30.0,
             "V_DC_DIFF_mV": 30.0, "V_DD_V": 5.0,
+            "date": "2026-04-29", "operator": "T",
+        },
+        {
+            "module_id": "M1", "range": "RANGE_4", "condition": "R470",
+            "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 0.0,
+            "V_DC_DIFF_mV": 0.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
         },
         {
@@ -216,13 +238,26 @@ def test_g_lin_trusted_band_freqs_restricts_evaluation():
 # ---------------------------------------------------------------
 
 
+def _dc_bias_pair(module_id: str = "M1") -> list:
+    """Both required §E.11 conditions at the gating range, both PASS."""
+    return [
+        {
+            "module_id": module_id, "range": "RANGE_4", "condition": "NOLOAD",
+            "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 30.0,
+            "V_DC_DIFF_mV": 30.0, "V_DD_V": 5.0,
+            "date": "2026-04-29", "operator": "T",
+        },
+        {
+            "module_id": module_id, "range": "RANGE_4", "condition": "R470",
+            "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 0.0,
+            "V_DC_DIFF_mV": 0.0, "V_DD_V": 5.0,
+            "date": "2026-04-29", "operator": "T",
+        },
+    ]
+
+
 def test_run_g_dc3_writes_both_text_and_json(tmp_path: Path):
-    csv_path = _dc_bias_csv(tmp_path, [{
-        "module_id": "M1", "range": "RANGE_4", "condition": "NOLOAD",
-        "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 30.0,
-        "V_DC_DIFF_mV": 30.0, "V_DD_V": 5.0,
-        "date": "2026-04-29", "operator": "T",
-    }])
+    csv_path = _dc_bias_csv(tmp_path, _dc_bias_pair())
     out_dir = tmp_path / "reports"
     report = run_g_dc3(csv_path, out_dir, fmt="both")
     assert report.verdict == GateVerdict.PASS
@@ -231,12 +266,7 @@ def test_run_g_dc3_writes_both_text_and_json(tmp_path: Path):
 
 
 def test_run_g_dc3_returns_report_when_no_output_dir(tmp_path: Path):
-    csv_path = _dc_bias_csv(tmp_path, [{
-        "module_id": "M1", "range": "RANGE_4", "condition": "NOLOAD",
-        "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 30.0,
-        "V_DC_DIFF_mV": 30.0, "V_DD_V": 5.0,
-        "date": "2026-04-29", "operator": "T",
-    }])
+    csv_path = _dc_bias_csv(tmp_path, _dc_bias_pair())
     report = run_g_dc3(csv_path)
     assert report.verdict == GateVerdict.PASS
 

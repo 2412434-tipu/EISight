@@ -102,13 +102,26 @@ def evaluate_g_sat(
     Module verdict aggregates only primary-load verdicts; loads
     in informational_loads contribute per-item rows but do not
     affect the verdict.
+
+    Required-evidence contract: a module must carry the anchor
+    load AND every primary load to be evaluable. Missing the
+    anchor or any primary load yields module-level NOT_EVALUATED
+    rather than silent PASS. Empty cal table or zero evaluable
+    modules yields overall NOT_EVALUATED.
     """
     if cal_df.empty:
         return GateReport(
             gate_id="G-SAT",
-            verdict=GateVerdict.PASS,
-            summary="G-SAT: empty calibration table -- gate not evaluated",
-            details={"row_count": 0},
+            verdict=GateVerdict.NOT_EVALUATED,
+            summary=(
+                "G-SAT: empty calibration table -- "
+                "gate NOT_EVALUATED (unsafe-as-PASS)"
+            ),
+            details={
+                "row_count": 0,
+                "anchor_load_id": anchor_load_id,
+                "primary_loads": list(primary_loads),
+            },
             per_item=pd.DataFrame(),
         )
 
@@ -118,8 +131,18 @@ def evaluate_g_sat(
 
     all_loads = tuple(primary_loads) + tuple(informational_loads)
     per_item_rows: List[dict] = []
+    modules_not_evaluated: List[Tuple[str, List[str]]] = []
+    modules_evaluated: List[str] = []
 
     for module_id, mod in cal.groupby("module_id", sort=True):
+        loads_present = set(mod["load_id"].astype(str).unique().tolist())
+        required = (anchor_load_id,) + tuple(primary_loads)
+        missing = [r for r in required if r not in loads_present]
+        if missing:
+            modules_not_evaluated.append((str(module_id), sorted(missing)))
+            continue
+        modules_evaluated.append(str(module_id))
+
         anchor_gf = (
             mod[mod["load_id"] == anchor_load_id]
             .set_index("frequency_hz")["gain_factor"]
@@ -157,15 +180,27 @@ def evaluate_g_sat(
                 })
 
     per_item = pd.DataFrame(per_item_rows)
-    if per_item.empty:
+
+    if not modules_evaluated:
+        # Either zero modules in cal_df or every module was missing
+        # required loads; either way we have no evidence to pass on.
         return GateReport(
             gate_id="G-SAT",
-            verdict=GateVerdict.PASS,
+            verdict=GateVerdict.NOT_EVALUATED,
             summary=(
-                "G-SAT: no rows for primary or informational loads -- "
-                "gate not evaluated"
+                "G-SAT: NOT_EVALUATED -- no module carries both anchor "
+                f"{anchor_load_id!r} and primary loads "
+                f"{list(primary_loads)}"
             ),
-            details={"row_count": 0},
+            details={
+                "anchor_load_id": anchor_load_id,
+                "primary_loads": list(primary_loads),
+                "informational_loads": list(informational_loads),
+                "modules_not_evaluated": [
+                    {"module_id": m, "missing_loads": ls}
+                    for m, ls in modules_not_evaluated
+                ],
+            },
             per_item=per_item,
         )
 
@@ -184,13 +219,33 @@ def evaluate_g_sat(
             else GateVerdict.FAIL.value
         )
 
-    overall = aggregate_verdict(primary_verdicts) if primary_verdicts else GateVerdict.PASS
+    if not primary_verdicts:
+        # Defensive: every evaluable module produced zero primary-load
+        # verdict rows (e.g. all primary loads had no matching anchor
+        # frequency). Treat as NOT_EVALUATED rather than silent PASS.
+        rolled = GateVerdict.NOT_EVALUATED
+    else:
+        rolled = aggregate_verdict(primary_verdicts)
+
+    if rolled == GateVerdict.PASS and modules_not_evaluated:
+        # Some modules passed, but others lacked required evidence.
+        # The aggregate is still NOT_EVALUATED because not every
+        # module that was supposed to ship has an actual verdict.
+        overall = GateVerdict.NOT_EVALUATED
+    else:
+        overall = rolled
+
     summary = (
         f"G-SAT: {overall.value} on primary loads "
         f"{list(primary_loads)} (anchor {anchor_load_id}; "
         f"min contiguous band {min_band_width_hz/1000:g} kHz at "
         f"|epsilon_R|<={pass_threshold_pct:g}%)"
     )
+    if modules_not_evaluated:
+        summary += (
+            f" -- modules NOT_EVALUATED: "
+            f"{[m for m, _ in modules_not_evaluated]}"
+        )
 
     details = {
         "anchor_load_id": anchor_load_id,
@@ -198,6 +253,11 @@ def evaluate_g_sat(
         "informational_loads": list(informational_loads),
         "pass_threshold_pct": pass_threshold_pct,
         "min_band_width_hz": min_band_width_hz,
+        "modules_evaluated": sorted(modules_evaluated),
+        "modules_not_evaluated": [
+            {"module_id": m, "missing_loads": ls}
+            for m, ls in modules_not_evaluated
+        ],
         **band_widths,
     }
 

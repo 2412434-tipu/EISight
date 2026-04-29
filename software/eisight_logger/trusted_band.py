@@ -6,17 +6,36 @@ of the following hold:
 
   1. magnitude residual on R330 / R470 / R1k below threshold
      (H.4 v1: <= 3 %, stronger paper target 1.5 %)
-  2. phase residual on resistors not pathological
-     (H.4 v1: <= 5 deg, stronger 3 deg)
-  3. replicate CV acceptable
-     (H.4 v1: <= 1 %, stronger 0.5 %)
-  4. AD5933 STATUS flags valid (H.8: invalid-data flag rejects)
-  5. no real/imag saturation at the §I.2.a int16 endpoints
+  2. replicate CV acceptable on every required band resistor
+     (H.4 v1: <= 1 %, stronger 0.5 %). NaN CV (under-replicated
+     CAL group; calibration emits NaN when fewer than 2 repeats
+     survived) is treated as untrusted -- the §H.4 cv check
+     cannot pass without an actual replicate variance, so the
+     'silent NaN passes' default would be unsafe.
+  3. AD5933 STATUS flags valid (H.8: invalid-data flag rejects)
+  4. no real/imag saturation at the §I.2.a int16 endpoints
      (H.8 / §I.2.a)
-  6. no phase discontinuity (H.8: phase jump > 10 deg between
-     adjacent resistor frequency points; both endpoints taint)
-  7. G-SAT did not flag the load at this frequency (F.10.a
+  5. no phase discontinuity (H.8: |Δφ_system| > 10 deg between
+     adjacent resistor frequency points; both endpoints taint).
+     This is a smoothness check on the per-load atan2 sequence,
+     not an absolute-phase residual -- phase_system_deg by
+     itself is not a resistor residual (the IV-stage TIA + ADC
+     adds a per-frequency offset that is a real characterization,
+     not a defect), so an absolute |φ_system_deg| > N rejection
+     would falsely throw out healthy frequencies.
+  6. G-SAT did not flag the load at this frequency (F.10.a
      analysis result; supplied by gates.py)
+
+Earlier revisions of this module also applied an absolute
+|phase_system_deg| > 5 deg rejection criterion. That was
+removed: phase_system_deg is the *system* phase offset (the
+fixture + AD5933 IV-stage added phase), and treating it as a
+resistor residual conflates calibration evidence with defect
+detection. A corrected resistor phase-*residual* check would
+need to compute the post-calibration phase residual against the
+ideal-resistor 0-deg model, not the raw phase_system_deg, and
+is intentionally not implemented here pending the §H.4 v2
+phase-residual definition.
 
 Magnitude residual uses the §H.2 identity: with
 GF_X(f) = 1 / (R_X * M_X(f)), the apparent calibrated
@@ -146,8 +165,15 @@ def evaluate_trusted_band(
                 cal_at_f, anchor_gf.get(freq), anchor_load_id,
                 mag_residual_pct_max,
             )
-            reasons += _check_phase_residual(cal_at_f, phase_residual_deg_max)
-            reasons += _check_cv(cal_at_f, cv_pct_max)
+            # The absolute |phase_system_deg| residual check was
+            # removed -- phase_system is a system characterization,
+            # not a resistor defect (see module docstring). The
+            # adjacency-jump check below stays as the smoothness
+            # criterion. phase_residual_deg_max is retained as a
+            # parameter for back-compat / signature stability but
+            # no longer drives a per-frequency rejection.
+            _ = phase_residual_deg_max
+            reasons += _check_cv(cal_at_f, cv_pct_max, band_resistors)
             reasons += _check_status_and_saturation(raw_at_f)
             if freq in phase_jump_freqs:
                 reasons.append(f"phase jump >{phase_jump_deg_max:g}deg adjacent")
@@ -276,25 +302,37 @@ def _check_mag_residual(
     return reasons
 
 
-def _check_phase_residual(cal_at_f: pd.DataFrame, threshold_deg: float) -> list:
-    # Ideal R has 0 phase, so |phi_system_deg| IS the residual.
-    reasons = []
-    for _, row in cal_at_f.iterrows():
-        phi_deg = abs(float(row["phase_system_deg"]))
-        if phi_deg > threshold_deg:
-            reasons.append(
-                f"|phi_system| {phi_deg:.2f}deg > {threshold_deg:g}deg on {row['load_id']}"
-            )
-    return reasons
+def _check_cv(
+    cal_at_f: pd.DataFrame,
+    threshold_pct: float,
+    band_resistors: Tuple[str, ...],
+) -> list:
+    """§H.4 replicate-CV gate; NaN CV on a required band resistor
+    is untrusted.
 
-
-def _check_cv(cal_at_f: pd.DataFrame, threshold_pct: float) -> list:
+    NaN repeat_cv_percent means under-replicated CAL (calibration
+    emits NaN when fewer than 2 sweeps survived for that
+    (module, range, load, frequency) group). The §H.4 cv check is
+    "replicate variance is small enough"; we cannot confirm that
+    without an actual variance, so for required band resistors a
+    NaN cv is rejected. Non-band resistors (informational only)
+    keep the legacy silent-skip behavior.
+    """
     reasons = []
+    required = set(band_resistors)
     for _, row in cal_at_f.iterrows():
         cv = row["repeat_cv_percent"]
-        if pd.notna(cv) and float(cv) > threshold_pct:
+        load = str(row["load_id"])
+        if pd.isna(cv):
+            if load in required:
+                reasons.append(
+                    f"CV NaN (under-replicated) on {load} -- "
+                    "required band resistor"
+                )
+            continue
+        if float(cv) > threshold_pct:
             reasons.append(
-                f"CV {float(cv):.2f}% > {threshold_pct:g}% on {row['load_id']}"
+                f"CV {float(cv):.2f}% > {threshold_pct:g}% on {load}"
             )
     return reasons
 
