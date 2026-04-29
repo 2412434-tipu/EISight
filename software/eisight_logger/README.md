@@ -93,6 +93,77 @@ or `--load-id` is omitted, the firmware-provided value is
 preserved. The listener does not infer labels from filenames,
 sample IDs, or session IDs.
 
+## Range 4 real annotated calibration replay
+
+Use this workflow for first real Range 4 resistor calibration
+captures where firmware `sweep_begin` records have blank
+`row_type` / `load_id` metadata. It validates each captured JSONL,
+replays each load with explicit CAL metadata, combines the emitted
+raw CSVs, then runs strict calibration, QC, G-SAT, trusted-band,
+and diagnostic plots.
+
+Important listener behavior: `eisight-logger listen` does not
+append to an existing `raw.csv`. Each invocation writes fresh
+`raw.{jsonl,csv}` under `output_root/session_id`; reusing the same
+`--output-root` and `--session-id` for a different load can overwrite
+the previous listener output. Because `--load-id` is one global
+override per listener run, replay blank-metadata captures separately
+per calibration load, then concatenate the resulting `raw.csv` files.
+The copied `raw.jsonl` files remain unmodified; annotations affect
+`raw.csv` metadata only.
+
+Assumptions:
+
+- Each load JSONL contains the required repeat sweeps with distinct
+  `sweep_id` values.
+- `hardware/resistor_inventory.csv` contains actual measured values
+  for every required `load_id`.
+- This workflow covers Range 4 / G-SAT / trusted-band readiness. It
+  does not make G-LIN a real-hardware workflow; Range 2 acquisition
+  remains future work.
+
+```powershell
+$Session = "CAL_R4_REAL_01"
+$Cap = "captures\CAL_R4_REAL_01"
+$Root = "data\real\CAL_R4_REAL_01"
+$Inventory = "hardware\resistor_inventory.csv"
+$Loads = @("R330_01", "R470_01", "R1k_01", "R4k7_01")
+
+foreach ($load in $Loads) {
+  eisight-logger validate "$Cap\$load.jsonl"
+}
+
+foreach ($load in $Loads) {
+  eisight-logger listen --session-id $Session `
+    --replay "$Cap\$load.jsonl" `
+    --output-root "$Root\listen\$load" `
+    --row-type CAL --load-id $load
+}
+
+New-Item -ItemType Directory -Force "$Root\combined", "$Root\reports", "$Root\plots" | Out-Null
+
+$RawParts = $Loads | ForEach-Object { "$Root\listen\$_\$Session\raw.csv" }
+Import-Csv -Path $RawParts | Export-Csv -Path "$Root\combined\raw.csv" -NoTypeInformation
+
+eisight-logger calibrate "$Root\combined\raw.csv" $Inventory "$Root\cal.csv"
+
+eisight-logger qc "$Root\combined\raw.csv" "$Root\raw_qc.csv"
+
+eisight-logger gate --type g_sat --cal "$Root\cal.csv" `
+  --output-dir "$Root\reports" `
+  --failures-output "$Root\reports\g_sat_failures.csv" `
+  --fmt both
+
+eisight-logger trust "$Root\raw_qc.csv" "$Root\cal.csv" `
+  --g-sat-failures "$Root\reports\g_sat_failures.csv" `
+  --raw-output "$Root\raw_trusted.csv" `
+  --cal-output "$Root\cal_trusted.csv"
+
+eisight-logger plot --type calibration --cal "$Root\cal.csv" --output-dir "$Root\plots"
+eisight-logger plot --type repeatability --cal "$Root\cal.csv" --output-dir "$Root\plots"
+eisight-logger plot --type trusted-band --trusted-csv "$Root\cal_trusted.csv" --output-dir "$Root\plots"
+```
+
 ## End-to-end walk-through (synthetic data, no hardware)
 
 This sequence runs from a fresh checkout against the synthetic
