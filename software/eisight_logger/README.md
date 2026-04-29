@@ -27,8 +27,9 @@ eisight-logger --help
 ```
 
 Seven subcommands are exposed: `listen`, `validate`,
-`calibrate`, `qc`, `trust`, `gate`, `plot`. `plot` is a
-`NotImplementedError` stub until `plots.py` lands.
+`calibrate`, `qc`, `trust`, `gate`, `plot`. `plot` writes
+static matplotlib diagnostics from raw, calibration, and
+trusted-band CSVs.
 
 ## Subcommand reference
 
@@ -45,7 +46,34 @@ in the relevant module and wire ~10 lines into `cli.py`.
 | `qc`        | `qc.run_qc`                        | §H.7, §H.8      |
 | `trust`     | `trusted_band.run_trusted_band`    | §H.5            |
 | `gate`      | `gates.run_g_dc3 / run_g_sat / run_g_lin` | §E.11, §F.10.a/b |
-| `plot`      | (pending `plots.py`)               | —               |
+| `plot`      | `plots.run_plot`                   | diagnostics     |
+
+## Static plot examples
+
+Plots are read-only with respect to their input CSVs and write one
+figure per `(module_id, range_setting)` group:
+
+```
+eisight-logger plot --type raw-dft \
+    --raw raw.csv --output-dir plots
+
+eisight-logger plot --type calibration \
+    --cal cal.csv --output-dir plots
+
+eisight-logger plot --type repeatability \
+    --cal cal.csv --output-dir plots
+
+eisight-logger plot --type trusted-band \
+    --trusted-csv cal_trusted.csv --output-dir plots
+```
+
+Common filters are available when the columns exist:
+
+```
+eisight-logger plot --type raw-dft --raw raw.csv \
+    --output-dir plots --module-id AD5933-A-DIRECT \
+    --range-setting RANGE_4 --load-id R1k_01
+```
 
 ## End-to-end walk-through (synthetic data, no hardware)
 
@@ -166,7 +194,7 @@ evaluated. `qc_reasons` is semicolon-joined.
 
 ### §I.6 calibration (`cal.csv`)
 
-`session_id, module_id, load_id, nominal_ohm, actual_ohm,
+`session_id, module_id, load_id, range_setting, nominal_ohm, actual_ohm,
 dmm_model, dmm_accuracy_class_pct, frequency_hz, gain_factor,
 phase_system_deg, repeat_cv_percent, trusted_flag`
 
@@ -212,8 +240,8 @@ ML, no UI. Every interpretation lives in this package.
 ## Tests
 
 `tests/synthetic/` contains a deterministic ideal-resistor
-fixture generator and four pytest files exercising the schema,
-calibration, QC, and gate layers (67 tests total). Run them
+fixture generator and pytest coverage for the schema,
+calibration, QC, gate, and plot layers. Run them
 from the repo root:
 
 ```
