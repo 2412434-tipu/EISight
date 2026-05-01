@@ -1,0 +1,1 @@
+module_id,esp32_id,i2c_speed_hz,device_found_hex,status_read_count,status_read_errors,temp_read_count,temp_read_errors,temperature_min_c,temperature_max_c,date,operator,result,notes
