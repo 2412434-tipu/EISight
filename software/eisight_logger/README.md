@@ -230,7 +230,7 @@ eisight-logger gate --type g_sat --cal /tmp/walk/cal.csv \
 #    you populated by hand (or via scripts/validate_logs.py's
 #    template).
 cat > /tmp/walk/dc_bias_check.csv <<EOF
-module_id,range,condition,V_DC_P1_GND_mV,V_DC_P2_GND_mV,V_DC_DIFF_mV,V_DD_V,date,operator
+module_id,range_setting,condition,V_DC_P1_GND_mV,V_DC_P2_GND_mV,V_DC_DIFF_mV,V_DD_V,date,operator
 AD5933-A-DIRECT,RANGE_4,NOLOAD,0.0,15.0,15.0,5.0,2026-04-29,T
 AD5933-A-DIRECT,RANGE_4,R470,0.0,30.0,30.0,5.0,2026-04-29,T
 EOF

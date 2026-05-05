@@ -1,7 +1,7 @@
 """g_dc3.py -- §E.11 DC-bias gate (G-DC3) evaluator.
 
 §E.11 logs DC bias measurements to hardware/dc_bias_check.csv
-(§F.6 schema) with one row per (module_id, range, condition)
+(§F.6 schema) with one row per (module_id, range_setting, condition)
 triple. The gate evaluates |V_DC(P1-P2)| against three bands:
 
   PASS:  < 50 mV
@@ -25,6 +25,7 @@ Consumes: hardware/dc_bias_check.csv.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import List, Optional, Union
 
@@ -51,12 +52,23 @@ G_DC3_GATING_RANGE = "RANGE_4"
 # so the module verdict is NOT_EVALUATED instead.
 G_DC3_REQUIRED_CONDITIONS: List[str] = ["NOLOAD", "R470"]
 
-# §F.6 column list for hardware/dc_bias_check.csv.
+# §F.6 column list for hardware/dc_bias_check.csv. The canonical
+# range identity column is `range_setting`, matching the rest of
+# the v4.0c pipeline (cal.csv, raw.csv, g_sat, g_lin, trusted_band).
+# Earlier revisions of the §F.6 template used a `range` column;
+# load_dc_bias_csv accepts that legacy name and renames it to
+# `range_setting` (with a deprecation note to stderr) so existing
+# operator CSVs continue to flow through the gate unchanged.
 DC_BIAS_CSV_COLUMNS: List[str] = [
-    "module_id", "range", "condition",
+    "module_id", "range_setting", "condition",
     "V_DC_P1_GND_mV", "V_DC_P2_GND_mV", "V_DC_DIFF_mV",
     "V_DD_V", "date", "operator",
 ]
+
+# Legacy column name accepted by load_dc_bias_csv for backward
+# compatibility with pre-v4.0d dc_bias_check.csv files. Conflict
+# with the canonical column on any row is fail-closed.
+_LEGACY_RANGE_COLUMN = "range"
 
 
 def evaluate_g_dc3(
@@ -133,7 +145,7 @@ def evaluate_g_dc3(
     # must surface as NOT_EVALUATED -- silently dropping it would
     # let an incomplete dc_bias_check.csv pass G-DC3 by omission.
     all_modules = sorted(work["module_id"].astype(str).unique().tolist())
-    gating_rows = work[work["range"] == gating_range]
+    gating_rows = work[work["range_setting"] == gating_range]
 
     # Per-module evidence + verdict roll-up. A module that is missing
     # any required condition at the gating range cannot pass; the
@@ -208,7 +220,7 @@ def evaluate_g_dc3(
         )
 
     per_item = work[[
-        "module_id", "range", "condition",
+        "module_id", "range_setting", "condition",
         "V_DC_P1_GND_mV", "V_DC_P2_GND_mV", "V_DC_DIFF_mV",
         "abs_diff_mv", "verdict",
     ]].copy()
@@ -228,14 +240,60 @@ def load_dc_bias_csv(path: Union[Path, str]) -> pd.DataFrame:
     Validates §F.6 column presence (raises on missing). Does
     not coerce types -- evaluate_g_dc3 handles numeric coercion
     on the columns it actually uses.
+
+    Backward compatibility: pre-v4.0d CSVs used a `range` column
+    instead of the canonical `range_setting`. This loader accepts
+    either form:
+
+      - canonical only (`range_setting`)         -> happy path
+      - legacy only    (`range`)                 -> rename + stderr note
+      - both, agree on every row                 -> drop legacy, keep canonical
+      - both, disagree on any row                -> fail closed (ValueError)
+
+    Picking a winner on disagreement is unsafe because the gate's
+    Range 4 promotion rule (§E.11 step 8) would silently use the
+    wrong identity. The operator must reconcile the CSV first.
     """
     p = Path(path)
     df = pd.read_csv(p)
+    df = _normalize_range_setting(df, p)
     missing = set(DC_BIAS_CSV_COLUMNS) - set(df.columns)
     if missing:
         raise ValueError(
             f"{p}: missing §F.6 columns {sorted(missing)}"
         )
+    return df
+
+
+def _normalize_range_setting(df: pd.DataFrame, source: Path) -> pd.DataFrame:
+    """Reconcile legacy `range` column with canonical `range_setting`.
+
+    Returns a frame guaranteed to carry `range_setting` (when either
+    column was present in the input) and never carry the legacy
+    `range` column.
+    """
+    has_canonical = "range_setting" in df.columns
+    has_legacy = _LEGACY_RANGE_COLUMN in df.columns
+    if has_canonical and has_legacy:
+        canon = df["range_setting"].fillna("").astype(str)
+        legacy = df[_LEGACY_RANGE_COLUMN].fillna("").astype(str)
+        conflict_mask = canon != legacy
+        if conflict_mask.any():
+            bad_idx = int(conflict_mask.idxmax())
+            raise ValueError(
+                f"{source}: 'range' and 'range_setting' disagree on "
+                f"row {bad_idx} (range={legacy.iloc[bad_idx]!r}, "
+                f"range_setting={canon.iloc[bad_idx]!r}). Refusing to "
+                "pick a winner; reconcile the CSV before re-running."
+            )
+        return df.drop(columns=[_LEGACY_RANGE_COLUMN])
+    if has_legacy and not has_canonical:
+        print(
+            f"{source}: legacy column 'range' detected; renaming to "
+            "'range_setting'. Update the CSV header to silence this note.",
+            file=sys.stderr,
+        )
+        return df.rename(columns={_LEGACY_RANGE_COLUMN: "range_setting"})
     return df
 
 

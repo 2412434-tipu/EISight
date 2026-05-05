@@ -150,7 +150,7 @@ def test_g_lin_empty_cal_is_not_evaluated():
 
 def test_g_dc3_missing_r470_at_gating_range_is_not_evaluated():
     df = pd.DataFrame([{
-        "module_id": "M1", "range": "RANGE_4", "condition": "NOLOAD",
+        "module_id": "M1", "range_setting": "RANGE_4", "condition": "NOLOAD",
         "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 5.0,
         "V_DC_DIFF_mV": 5.0, "V_DD_V": 5.0,
         "date": "2026-04-29", "operator": "T",
@@ -161,7 +161,7 @@ def test_g_dc3_missing_r470_at_gating_range_is_not_evaluated():
 
 def test_g_dc3_missing_noload_at_gating_range_is_not_evaluated():
     df = pd.DataFrame([{
-        "module_id": "M1", "range": "RANGE_4", "condition": "R470",
+        "module_id": "M1", "range_setting": "RANGE_4", "condition": "R470",
         "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 5.0,
         "V_DC_DIFF_mV": 5.0, "V_DD_V": 5.0,
         "date": "2026-04-29", "operator": "T",
@@ -548,13 +548,13 @@ def test_cli_gate_g_sat_returns_nonzero_for_fail(tmp_path: Path):
 def test_cli_gate_g_dc3_returns_nonzero_for_warn(tmp_path: Path):
     rows = [
         {
-            "module_id": "M1", "range": "RANGE_4", "condition": "NOLOAD",
+            "module_id": "M1", "range_setting": "RANGE_4", "condition": "NOLOAD",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 70.0,
             "V_DC_DIFF_mV": 70.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
         },
         {
-            "module_id": "M1", "range": "RANGE_4", "condition": "R470",
+            "module_id": "M1", "range_setting": "RANGE_4", "condition": "R470",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 0.0,
             "V_DC_DIFF_mV": 0.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
@@ -573,13 +573,13 @@ def test_cli_gate_g_dc3_returns_nonzero_for_warn(tmp_path: Path):
 def test_cli_gate_g_dc3_returns_zero_for_pass(tmp_path: Path):
     rows = [
         {
-            "module_id": "M1", "range": "RANGE_4", "condition": "NOLOAD",
+            "module_id": "M1", "range_setting": "RANGE_4", "condition": "NOLOAD",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 5.0,
             "V_DC_DIFF_mV": 5.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
         },
         {
-            "module_id": "M1", "range": "RANGE_4", "condition": "R470",
+            "module_id": "M1", "range_setting": "RANGE_4", "condition": "R470",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 0.0,
             "V_DC_DIFF_mV": 0.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
@@ -932,7 +932,7 @@ def test_strict_calibration_accepts_clean_complete_input():
 
 def test_g_dc3_module_with_only_range2_is_not_evaluated():
     df = pd.DataFrame([{
-        "module_id": "M1", "range": "RANGE_2", "condition": "NOLOAD",
+        "module_id": "M1", "range_setting": "RANGE_2", "condition": "NOLOAD",
         "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 5.0,
         "V_DC_DIFF_mV": 5.0, "V_DD_V": 5.0,
         "date": "2026-04-29", "operator": "T",
@@ -948,19 +948,19 @@ def test_g_dc3_one_module_passing_other_only_range2_is_not_evaluated():
     # Overall must NOT be PASS even though M1 passed.
     df = pd.DataFrame([
         {
-            "module_id": "M1", "range": "RANGE_4", "condition": "NOLOAD",
+            "module_id": "M1", "range_setting": "RANGE_4", "condition": "NOLOAD",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 5.0,
             "V_DC_DIFF_mV": 5.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
         },
         {
-            "module_id": "M1", "range": "RANGE_4", "condition": "R470",
+            "module_id": "M1", "range_setting": "RANGE_4", "condition": "R470",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 0.0,
             "V_DC_DIFF_mV": 0.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
         },
         {
-            "module_id": "M2", "range": "RANGE_2", "condition": "NOLOAD",
+            "module_id": "M2", "range_setting": "RANGE_2", "condition": "NOLOAD",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 5.0,
             "V_DC_DIFF_mV": 5.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
@@ -975,25 +975,25 @@ def test_g_dc3_one_module_passing_other_only_range2_is_not_evaluated():
 def test_g_dc3_two_modules_both_pass_overall_pass():
     df = pd.DataFrame([
         {
-            "module_id": "M1", "range": "RANGE_4", "condition": "NOLOAD",
+            "module_id": "M1", "range_setting": "RANGE_4", "condition": "NOLOAD",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 5.0,
             "V_DC_DIFF_mV": 5.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
         },
         {
-            "module_id": "M1", "range": "RANGE_4", "condition": "R470",
+            "module_id": "M1", "range_setting": "RANGE_4", "condition": "R470",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 0.0,
             "V_DC_DIFF_mV": 0.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
         },
         {
-            "module_id": "M2", "range": "RANGE_4", "condition": "NOLOAD",
+            "module_id": "M2", "range_setting": "RANGE_4", "condition": "NOLOAD",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 5.0,
             "V_DC_DIFF_mV": 5.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
         },
         {
-            "module_id": "M2", "range": "RANGE_4", "condition": "R470",
+            "module_id": "M2", "range_setting": "RANGE_4", "condition": "R470",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 0.0,
             "V_DC_DIFF_mV": 0.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
