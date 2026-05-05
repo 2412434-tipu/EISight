@@ -7,6 +7,12 @@ thresholds.
 Coverage:
   - G-DC3: tri-state per §E.11 (<50 mV PASS, 50-100 WARN,
     >=100 FAIL) on the gating Range 4.
+  - G-DC3 schema: load_dc_bias_csv accepts the canonical
+    `range_setting` column, accepts the legacy `range` column
+    with a deprecation note, and fails closed when both
+    columns disagree on any row.
+  - validate_logs.py: shipped hardware/ templates pass the
+    header-conformance check (exit 0).
   - G-SAT: clean synthetic cal -> PASS; deliberately-bumped
     primary load residual > 5% -> FAIL. Also exercises the
     failures_output CSV sidecar (cross-module schema with
@@ -19,6 +25,8 @@ Coverage:
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 import pandas as pd
@@ -34,8 +42,13 @@ from eisight_logger.gates import (
     run_g_lin,
     run_g_sat,
 )
-from eisight_logger.gates.g_dc3 import DC_BIAS_CSV_COLUMNS
+from eisight_logger.gates.g_dc3 import (
+    DC_BIAS_CSV_COLUMNS,
+    load_dc_bias_csv,
+)
 from eisight_logger.gates.g_sat import G_SAT_FAILURE_COLUMNS
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 _FREQS = [5000.0 + 1000.0 * i for i in range(96)]
 _CAL_LOADS = ("R100_01", "R330_01", "R470_01", "R1k_01", "R4k7_01", "R10k_01")
@@ -103,14 +116,14 @@ def test_g_dc3_pass_warn_fail_thresholds(vdc_mv, expected):
     # of the NOLOAD row.
     df = pd.DataFrame([
         {
-            "module_id": "AD5933-A-DIRECT", "range": "RANGE_4",
+            "module_id": "AD5933-A-DIRECT", "range_setting": "RANGE_4",
             "condition": "NOLOAD",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": vdc_mv,
             "V_DC_DIFF_mV": vdc_mv, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
         },
         {
-            "module_id": "AD5933-A-DIRECT", "range": "RANGE_4",
+            "module_id": "AD5933-A-DIRECT", "range_setting": "RANGE_4",
             "condition": "R470",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 0.0,
             "V_DC_DIFF_mV": 0.0, "V_DD_V": 5.0,
@@ -126,13 +139,13 @@ def test_g_dc3_module_fail_if_any_gating_row_fails():
     # other gating-range rows PASS (per §E.11's primary criterion).
     df = pd.DataFrame([
         {
-            "module_id": "M1", "range": "RANGE_4", "condition": "NOLOAD",
+            "module_id": "M1", "range_setting": "RANGE_4", "condition": "NOLOAD",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 30.0,
             "V_DC_DIFF_mV": 30.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
         },
         {
-            "module_id": "M1", "range": "RANGE_4", "condition": "R470",
+            "module_id": "M1", "range_setting": "RANGE_4", "condition": "R470",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 150.0,
             "V_DC_DIFF_mV": 150.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
@@ -149,19 +162,19 @@ def test_g_dc3_non_gating_range_does_not_promote_module_verdict():
     # the gating range for the module to be evaluable at all.
     df = pd.DataFrame([
         {
-            "module_id": "M1", "range": "RANGE_4", "condition": "NOLOAD",
+            "module_id": "M1", "range_setting": "RANGE_4", "condition": "NOLOAD",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 30.0,
             "V_DC_DIFF_mV": 30.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
         },
         {
-            "module_id": "M1", "range": "RANGE_4", "condition": "R470",
+            "module_id": "M1", "range_setting": "RANGE_4", "condition": "R470",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 0.0,
             "V_DC_DIFF_mV": 0.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
         },
         {
-            "module_id": "M1", "range": "RANGE_2", "condition": "NOLOAD",
+            "module_id": "M1", "range_setting": "RANGE_2", "condition": "NOLOAD",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 200.0,
             "V_DC_DIFF_mV": 200.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
@@ -244,13 +257,13 @@ def _dc_bias_pair(module_id: str = "M1") -> list:
     """Both required §E.11 conditions at the gating range, both PASS."""
     return [
         {
-            "module_id": module_id, "range": "RANGE_4", "condition": "NOLOAD",
+            "module_id": module_id, "range_setting": "RANGE_4", "condition": "NOLOAD",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 30.0,
             "V_DC_DIFF_mV": 30.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
         },
         {
-            "module_id": module_id, "range": "RANGE_4", "condition": "R470",
+            "module_id": module_id, "range_setting": "RANGE_4", "condition": "R470",
             "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 0.0,
             "V_DC_DIFF_mV": 0.0, "V_DD_V": 5.0,
             "date": "2026-04-29", "operator": "T",
@@ -307,3 +320,159 @@ def test_run_g_lin_via_trusted_band_csv(tmp_path: Path):
 
     report = run_g_lin(r4_path, r2_path, trusted_band_csv=tb_path)
     assert report.verdict == GateVerdict.PASS
+
+
+# ---------------------------------------------------------------
+# G-DC3 schema alignment: canonical `range_setting`, legacy
+# `range` back-compat, conflict fail-closed.
+# ---------------------------------------------------------------
+
+
+def _write_dc_bias_csv(
+    tmp_path: Path, header: list, rows: list, name: str = "dc_bias_check.csv",
+) -> Path:
+    """Write a §F.6-shaped CSV with the caller-supplied header verbatim.
+
+    Used to construct legacy / mixed schemas the loader must reconcile;
+    DC_BIAS_CSV_COLUMNS is the canonical header but is intentionally
+    NOT applied here so the back-compat path can be exercised.
+    """
+    out = tmp_path / name
+    df = pd.DataFrame(rows, columns=header)
+    df.to_csv(out, index=False)
+    return out
+
+
+_DC_BIAS_PASS_PAIR_CANONICAL = [
+    {
+        "module_id": "AD5933-A-DIRECT", "range_setting": "RANGE_4",
+        "condition": "NOLOAD",
+        "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 30.0,
+        "V_DC_DIFF_mV": 30.0, "V_DD_V": 5.0,
+        "date": "2026-04-29", "operator": "T",
+    },
+    {
+        "module_id": "AD5933-A-DIRECT", "range_setting": "RANGE_4",
+        "condition": "R470",
+        "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 0.0,
+        "V_DC_DIFF_mV": 0.0, "V_DD_V": 5.0,
+        "date": "2026-04-29", "operator": "T",
+    },
+]
+
+_DC_BIAS_PASS_PAIR_LEGACY = [
+    {**row, "range": row.pop("range_setting")}
+    for row in [dict(r) for r in _DC_BIAS_PASS_PAIR_CANONICAL]
+]
+
+
+def test_g_dc3_accepts_canonical_range_setting_csv(tmp_path: Path):
+    """Happy path: canonical `range_setting` header flows through unchanged."""
+    csv_path = _write_dc_bias_csv(
+        tmp_path, list(DC_BIAS_CSV_COLUMNS), _DC_BIAS_PASS_PAIR_CANONICAL,
+    )
+    report = run_g_dc3(csv_path)
+    assert report.verdict == GateVerdict.PASS
+
+
+def test_g_dc3_accepts_legacy_range_csv_with_deprecation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+):
+    """Legacy `range`-only CSVs are renamed and a stderr note is emitted."""
+    legacy_header = [
+        "module_id", "range", "condition",
+        "V_DC_P1_GND_mV", "V_DC_P2_GND_mV", "V_DC_DIFF_mV",
+        "V_DD_V", "date", "operator",
+    ]
+    csv_path = _write_dc_bias_csv(
+        tmp_path, legacy_header, _DC_BIAS_PASS_PAIR_LEGACY,
+    )
+    report = run_g_dc3(csv_path)
+    assert report.verdict == GateVerdict.PASS
+    captured = capsys.readouterr()
+    assert "legacy column 'range' detected" in captured.err
+    assert "renaming to 'range_setting'" in captured.err
+
+
+def test_g_dc3_fails_closed_when_range_and_range_setting_disagree(
+    tmp_path: Path,
+):
+    """Both columns present and conflicting on any row -> ValueError, fail-closed."""
+    mixed_header = [
+        "module_id", "range_setting", "range", "condition",
+        "V_DC_P1_GND_mV", "V_DC_P2_GND_mV", "V_DC_DIFF_mV",
+        "V_DD_V", "date", "operator",
+    ]
+    rows = [
+        {
+            "module_id": "AD5933-A-DIRECT", "range_setting": "RANGE_4",
+            "range": "RANGE_4", "condition": "NOLOAD",
+            "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 30.0,
+            "V_DC_DIFF_mV": 30.0, "V_DD_V": 5.0,
+            "date": "2026-04-29", "operator": "T",
+        },
+        {
+            # Disagreement on this row: canonical says RANGE_4, legacy says RANGE_2.
+            "module_id": "AD5933-A-DIRECT", "range_setting": "RANGE_4",
+            "range": "RANGE_2", "condition": "R470",
+            "V_DC_P1_GND_mV": 0.0, "V_DC_P2_GND_mV": 0.0,
+            "V_DC_DIFF_mV": 0.0, "V_DD_V": 5.0,
+            "date": "2026-04-29", "operator": "T",
+        },
+    ]
+    csv_path = _write_dc_bias_csv(tmp_path, mixed_header, rows)
+    with pytest.raises(ValueError) as excinfo:
+        load_dc_bias_csv(csv_path)
+    msg = str(excinfo.value)
+    assert "disagree" in msg
+    assert "row 1" in msg
+    assert "RANGE_2" in msg and "RANGE_4" in msg
+
+
+def test_g_dc3_accepts_both_columns_when_they_agree_on_every_row(
+    tmp_path: Path,
+):
+    """Both columns present and identical on every row -> drop legacy, PASS."""
+    paired_header = [
+        "module_id", "range_setting", "range", "condition",
+        "V_DC_P1_GND_mV", "V_DC_P2_GND_mV", "V_DC_DIFF_mV",
+        "V_DD_V", "date", "operator",
+    ]
+    rows = [
+        {**dict(r), "range": r["range_setting"]}
+        for r in _DC_BIAS_PASS_PAIR_CANONICAL
+    ]
+    csv_path = _write_dc_bias_csv(tmp_path, paired_header, rows)
+    report = run_g_dc3(csv_path)
+    assert report.verdict == GateVerdict.PASS
+
+
+# ---------------------------------------------------------------
+# validate_logs.py: the shipped hardware/ templates conform.
+# ---------------------------------------------------------------
+
+
+def test_validate_logs_passes_on_shipped_hardware_templates():
+    """`python scripts/validate_logs.py --hardware-dir <repo>/hardware` exits 0.
+
+    Validates the schema-alignment contract from the operator side:
+    after this PR the shipped header-only templates must satisfy the
+    REQUIRED_CSVS column sets in scripts/validate_logs.py without any
+    operator intervention.
+    """
+    hardware_dir = _REPO_ROOT / "hardware"
+    assert hardware_dir.is_dir(), f"missing hardware/ directory: {hardware_dir}"
+    result = subprocess.run(
+        [
+            sys.executable, "scripts/validate_logs.py",
+            "--hardware-dir", str(hardware_dir),
+        ],
+        cwd=str(_REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"validate_logs.py exited {result.returncode}; "
+        f"stdout=\n{result.stdout}\nstderr=\n{result.stderr}"
+    )

@@ -11,36 +11,50 @@ MALFORMED files are NOT modified -- the operator presumably
 populated the file by hand and a silent rewrite would lose
 data. Fix MALFORMED by adding the missing columns manually.
 
-Required files and column sets:
+Required files and column sets (aligned with the v4.0d shipped
+hardware/ templates; consumers must conform to the templates,
+not the other way around):
 
   dc_bias_check.csv (§F.6)
-      module_id, range, condition, V_DC_P1_GND_mV,
-      V_DC_P2_GND_mV, V_DC_DIFF_mV, V_DD_V, date, operator
-      Authoritative; columns enumerated explicitly in §F.6.
+      module_id, range_setting, condition,
+      V_DC_P1_GND_mV, V_DC_P2_GND_mV, V_DC_DIFF_mV,
+      V_DD_V, date, operator, result, notes
+      `range_setting` is the canonical range identity column
+      across the v4.0c/v4.0d pipeline (cal.csv, raw.csv,
+      g_sat, g_lin, trusted_band). g_dc3.load_dc_bias_csv
+      accepts the legacy `range` column for backward
+      compatibility.
 
   resistor_inventory.csv (§F.7 step 4 + G-DMMx)
-      load_id, nominal_ohm, measured_ohm, T_C, operator,
-      timestamp, lab_dmm_ohm, lab_dmm_model,
-      lab_dmm_accuracy_class_pct
-      §F.7 step 4 enumerates nominal_ohm, measured_ohm, T_C,
-      operator, timestamp; the labelling rule (R100_01 ..
-      R10k_10) implies the load_id key column used by
-      calibration.load_inventory. G-DMMx promotion adds the
-      three lab_dmm_* columns (§F.7 G-DMMx box).
+      load_id, nominal_ohm, measured_ohm,
+      dmm_id, dmm_model, dmm_accuracy_class_pct,
+      lead_residual_ohm, temperature_c, date, operator,
+      lab_dmm_ohm, lab_dmm_model, lab_dmm_accuracy_class_pct,
+      notes
+      Per shipped template: separates the field DMM
+      (dmm_id/dmm_model/dmm_accuracy_class_pct) from the
+      G-DMMx lab DMM (lab_dmm_*); records the lead-residual
+      subtraction column and the per-measurement temperature
+      and date.
 
   jumper_state.csv (§E.1, §E.7 step 11, §F.3)
-      module_id, J1, J2, J3, J4, J5, J6, mode, tag, date,
-      operator
-      §E.1 table column header (Module, J1..J6, Mode) + §E.7
-      step 11 'tag with post_rework' + standard date/operator
-      audit columns; the .tex does not enumerate this CSV's
-      columns explicitly.
+      module_id, stage, jumper, measured_ohm, continuity_beep,
+      observed_state, expected_state, date, operator, notes
+      Long-format per-jumper observation rows (one row per
+      jumper per stage), supersedes the wide J1..J6 schema.
+      Each row records continuity, measured ohms, observed
+      vs expected state, and operator audit metadata.
 
   dmm_inventory.csv (§F.7 step 1)
-      dmm_model, accuracy_class_pct, date, operator
-      §F.7 step 1 says "Record DMM model and accuracy class";
-      date and operator are the standard audit pair other
-      hardware logs carry.
+      dmm_id, model, serial_or_asset_id, owner,
+      basic_dc_voltage_accuracy_pct,
+      basic_resistance_accuracy_pct,
+      resistance_range_used, calibration_status,
+      date_logged, operator, notes
+      Per shipped template: full inventory row including
+      asset id, owner, DC and resistance accuracy class,
+      resistance range used during measurement, and
+      calibration status.
 
 Exit code: 0 if all required files PASS; 1 if any are
 MISSING or MALFORMED. Created templates count as MISSING for
@@ -73,9 +87,9 @@ REQUIRED_CSVS: Tuple[CsvSpec, ...] = (
     CsvSpec(
         filename="dc_bias_check.csv",
         columns=(
-            "module_id", "range", "condition",
+            "module_id", "range_setting", "condition",
             "V_DC_P1_GND_mV", "V_DC_P2_GND_mV", "V_DC_DIFF_mV",
-            "V_DD_V", "date", "operator",
+            "V_DD_V", "date", "operator", "result", "notes",
         ),
         cite="§F.6",
     ),
@@ -83,23 +97,31 @@ REQUIRED_CSVS: Tuple[CsvSpec, ...] = (
         filename="resistor_inventory.csv",
         columns=(
             "load_id", "nominal_ohm", "measured_ohm",
-            "T_C", "operator", "timestamp",
+            "dmm_id", "dmm_model", "dmm_accuracy_class_pct",
+            "lead_residual_ohm", "temperature_c", "date", "operator",
             "lab_dmm_ohm", "lab_dmm_model",
-            "lab_dmm_accuracy_class_pct",
+            "lab_dmm_accuracy_class_pct", "notes",
         ),
         cite="§F.7 + G-DMMx",
     ),
     CsvSpec(
         filename="jumper_state.csv",
         columns=(
-            "module_id", "J1", "J2", "J3", "J4", "J5", "J6",
-            "mode", "tag", "date", "operator",
+            "module_id", "stage", "jumper", "measured_ohm",
+            "continuity_beep", "observed_state", "expected_state",
+            "date", "operator", "notes",
         ),
         cite="§E.1/§E.7/§F.3",
     ),
     CsvSpec(
         filename="dmm_inventory.csv",
-        columns=("dmm_model", "accuracy_class_pct", "date", "operator"),
+        columns=(
+            "dmm_id", "model", "serial_or_asset_id", "owner",
+            "basic_dc_voltage_accuracy_pct",
+            "basic_resistance_accuracy_pct",
+            "resistance_range_used", "calibration_status",
+            "date_logged", "operator", "notes",
+        ),
         cite="§F.7 step 1",
     ),
 )
